@@ -19,6 +19,7 @@ struct test_codec_dev {
     bool opened;
 };
 static uint8_t registers[256];
+static int16_t written_pcm[8]; // 最近一次写入 I2S 的 PCM(校验软件音量)
 static int fail_reg = -1, fail_value = -1, fail_writes;
 static int fail_tx_fmt, fail_rx_fmt, fail_tx_enable, fail_rx_enable;
 static int fail_codec_delete;
@@ -157,7 +158,9 @@ static int data_read(const audio_codec_data_if_t *data, uint8_t *pcm, int size) 
     return rx_channel.running ? ESP_OK : ESP_FAIL;
 }
 static int data_write(const audio_codec_data_if_t *data, uint8_t *pcm, int size) {
-    (void)data; (void)pcm; (void)size;
+    (void)data;
+    // Capture PCM so the software volume path can be asserted.
+    if (size <= (int)sizeof(written_pcm)) memcpy(written_pcm, pcm, (size_t)size);
     return tx_channel.running ? ESP_OK : ESP_FAIL;
 }
 const audio_codec_data_if_t *audio_codec_new_i2s_data(audio_codec_i2s_cfg_t *cfg) {
@@ -290,8 +293,20 @@ int main(void) {
     assert(bsp_audio_sleep() == ESP_OK);
     assert(bsp_audio_wake() == ESP_OK);
     assert(codec_creations == created + 1 && ctrl_creations == controls && ctrl_deletions == deleted);
-    assert(tx_channel.hz == 8000 && registers[0x32] == 43);
+    assert(tx_channel.hz == 8000 && registers[0x32] == 100); // 硬件 DAC 固定满幅
     assert_active();
+
+    // 音量改由 PCM 软件缩放实现(硬件寄存器调节在真机上无听感变化)。
+    int16_t pcm_out[2] = { 1000, -1000 };
+    bsp_audio_set_volume(0);
+    assert(bsp_audio_write(pcm_out, sizeof(pcm_out)) == ESP_OK);
+    assert(written_pcm[0] == 0 && written_pcm[1] == 0);
+    bsp_audio_set_volume(100);
+    assert(bsp_audio_write(pcm_out, sizeof(pcm_out)) == ESP_OK);
+    assert(written_pcm[0] == 1000 && written_pcm[1] == -1000);
+    bsp_audio_set_volume(50); // 平方律:50% → 1/4 幅度
+    assert(bsp_audio_write(pcm_out, sizeof(pcm_out)) == ESP_OK);
+    assert(written_pcm[0] == 250 && written_pcm[1] == -250);
 
     fresh();
     unsigned starts = codec_starts;
@@ -318,7 +333,7 @@ int main(void) {
 
     // Actual start failure and an error swallowed by set_fs are both rejected.
     const int failing_regs[] = { 0x0d, 0x02, 0x16, 0x32 };
-    const int failing_values[] = { 0x01, 0x12, 0x0a, 0x00 };
+    const int failing_values[] = { 0x01, 0x12, 0x0a, 100 };
     for (size_t i = 0; i < sizeof(failing_regs) / sizeof(failing_regs[0]); ++i) {
         fresh();
         fault(failing_regs[i], failing_values[i], 1);

@@ -39,6 +39,18 @@ def function_body(source: str, name: str) -> str:
     raise AssertionError(f"function is unterminated: {name}")
 
 
+def implementation_body(source: str, name: str) -> str:
+    # Public BSP entry points may be thin mutex wrappers delegating to a
+    # `<prefix>_locked()` implementation (bsp_audio serializes its API because
+    # set_format briefly NULLs the codec device). Follow one delegation level
+    # so the behavioral assertions run against the real implementation.
+    body = function_body(source, name)
+    delegated = re.search(r"\b(\w+_locked)\s*\(", body)
+    if delegated:
+        return function_body(source, delegated.group(1))
+    return body
+
+
 def register_pairs(block: str) -> list[tuple[int, int]]:
     return [
         (int(reg, 16), int(value, 16))
@@ -88,13 +100,13 @@ class DeepSleepContractTest(unittest.TestCase):
         self.assertIn("pdMS_TO_TICKS(ES8311_SLEEP_RETRY_MS)", body)
 
     def test_audio_suspend_does_not_require_a_silent_open(self) -> None:
-        body = function_body(self.audio, "bsp_audio_sleep")
+        body = implementation_body(self.audio, "bsp_audio_sleep")
         self.assertIn("es8311_force_sleep()", body)
         self.assertIn("audio_disable_i2s_channels()", body)
         self.assertNotIn("bsp_audio_set_format", body)
 
     def test_i2s_pins_are_released_only_by_deep_sleep_api(self) -> None:
-        body = function_body(self.audio, "bsp_audio_prepare_deep_sleep")
+        body = implementation_body(self.audio, "bsp_audio_prepare_deep_sleep")
         for pin in ("BSP_I2S_MCLK", "BSP_I2S_BCLK", "BSP_I2S_WS",
                     "BSP_I2S_DOUT", "BSP_I2S_DIN"):
             self.assertIn(pin, body)

@@ -3,42 +3,46 @@ CONFIG_IDF_TARGET="esp32c3"
 # 注:ESP32-C3 无 PSRAM,故不设 CONFIG_SPIRAM。
 
 # --- Flash ---
-# FoloToy AI Passport 当前产品/固件基线使用 8MB Flash。
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
-# 固定 8MB 镜像头，关闭 detect，便于 idf.py merge-bin。
 CONFIG_ESPTOOLPY_HEADER_FLASHSIZE_UPDATE=n
-# 默认模板只保留 NVS、PHY data 和占用剩余空间的 factory app；用户可按需修改。
+# 电子工牌:nvs + phy + 3MB factory + 约 4.9MB FAT(照片/二维码/录音)。
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 
 # --- 控制台:USB-Serial-JTAG(C3 原生 USB,GPIO18/19)---
-# 不用 UART0:其默认 TX=GPIO21 与本板背光引脚冲突。
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
 # --- LVGL ---
 CONFIG_LV_COLOR_DEPTH_16=y
-# 20 ms display refresh period targets up to 50 FPS when rendering and SPI
-# transfer complete within the same budget.
 CONFIG_LV_DEF_REFR_PERIOD=20
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
-# LVGL 内置 malloc 池大小(KB)。它是独立静态区、不与系统堆共享,配大了会白白占用 RAM。
-# 本 demo UI 简单,24KB 足够;若自建复杂界面出现绘制卡死/看门狗,调大此值。
-CONFIG_LV_MEM_SIZE_KILOBYTES=24
+CONFIG_LV_FONT_MONTSERRAT_28=y
+# 首页时间大字体(48px)。
+CONFIG_LV_FONT_MONTSERRAT_48=y
+# 中文 UI:思源黑体 CJK 子集(正文 14 / 标题 16)。
+CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_14_CJK=y
+CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_16_CJK=y
+# 图片(相片/二维码 JPEG)与文件系统桥(S: 盘)。
+CONFIG_LV_USE_TJPGD=y
+CONFIG_LV_USE_FS_STDIO=y
+# S: 盘映射到 /badge(FAT 挂载点);路径形如 "S:/photo.jpg"。
+CONFIG_LV_FS_STDIO_LETTER=83
+CONFIG_LV_FS_STDIO_PATH="/badge"
+# LVGL 直接用 C 标准库 malloc,不再独占 40KB 私有池:C3 堆紧张,私有池会让
+# 通用堆碎片化(实测最大空闲块仅 3KB,Helix 解码器无法分配)。统一堆按需分配。
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_MEM_SIZE_KILOBYTES=40
+
+# --- FAT 文件系统(磨损均衡,storage 分区) ---
+CONFIG_FATFS_LFN_HEAP=y
 
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000
 
-# --- Bluetooth LE / NimBLE ---
-# ESP32-C3 仅支持 BLE；示例只启用单连接 peripheral 所需的最小 host 配置。
-CONFIG_BT_ENABLED=y
-CONFIG_BT_NIMBLE_ENABLED=y
-CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
-CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
-CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
-CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
-CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
-CONFIG_BT_NIMBLE_HOST_BASED_PRIVACY=n
-CONFIG_BT_NIMBLE_NVS_PERSIST=n
+# --- mbedTLS:动态 SSL 记录缓冲(无 PSRAM,省约 16KB 堆,修复 HTTPS OOM) ---
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y

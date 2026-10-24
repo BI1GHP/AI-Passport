@@ -1,0 +1,7 @@
+dependencies:
+  idf: ">=5.0"
+  # 网络电台 MP3 流解码(Helix)。纯软件解码,无需 PSRAM。
+  chmorgan/esp-libhelix-mp3: "^1.0.3"
+  # 小智AI 协议:WebSocket 客户端 + Opus 编解码(esp_audio_codec 预编译库,含 C3 定点 opus)
+  espressif/esp_websocket_client: "^1.5.1"
+  espressif/esp_audio_codec: "~2.5.0"

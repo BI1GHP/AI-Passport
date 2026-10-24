@@ -5,7 +5,7 @@ static void start_blink(lv_obj_t *eye);
 static lv_obj_t *block(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color)
 {
     lv_obj_t *obj = lv_obj_create(parent);
-    lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(obj, false);
     lv_obj_set_pos(obj, x, y);
     lv_obj_set_size(obj, w, h);
     lv_obj_set_style_radius(obj, 0, 0);
@@ -36,7 +36,7 @@ static void add_cloud(lv_obj_t *parent, int x, int y)
 lv_obj_t *ui_pixel_screen_create(const char *title)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
-    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(scr, false);
     lv_obj_set_style_bg_color(scr, lv_color_hex(UI_SKY), 0);
     lv_obj_set_style_border_width(scr, 0, 0);
     lv_obj_set_style_pad_all(scr, 0, 0);
@@ -72,7 +72,7 @@ lv_obj_t *ui_pixel_panel_create(lv_obj_t *parent, int x, int y, int w, int h,
 lv_obj_t *ui_pixel_mascot_create(lv_obj_t *parent, int x, int y)
 {
     lv_obj_t *m = lv_obj_create(parent);
-    lv_obj_remove_flag(m, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollable(m, false);
     lv_obj_set_pos(m, x, y);
     lv_obj_set_size(m, 38, 48);
     lv_obj_set_style_bg_opa(m, LV_OPA_TRANSP, 0);

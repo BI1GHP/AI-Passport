@@ -11,6 +11,7 @@
 #include "driver/i2s_std.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "bsp_audio";
@@ -29,8 +30,16 @@ static bool     s_sleeping;
 static bool     s_initialized;
 static esp_err_t s_sleep_result;
 static bool     s_codec_release_failed;
-static uint8_t  s_volume;
+// 软件音量(Q15,32768 = 满幅)。实测 ES8311 的 DAC 音量寄存器(REG32)在 BOTH
+// 模式下写入后听感无变化(音量 100→30 声音大小不变),故音量改由 PCM 缩放实现:
+// 硬件 DAC 固定满幅,用户音量只作用于写入 I2S 的采样,任何 codec 配置下都生效。
+static volatile int32_t s_sw_gain = 32768;
 static int      s_io_error;
+// bsp_audio 公共 API 互斥锁:set_format 会 delete/create codec 设备(s_dev 短暂
+// 为 NULL),另一任务此时调 set_volume/write 即空指针 Load access fault
+// (电台播放启动与按键音并发实测复现崩溃)。公共入口统一拿锁,内部调用的
+// 真实实现为 *_locked 静态函数,避免递归锁。
+static SemaphoreHandle_t s_api_lock;
 
 // esp_codec_dev 1.6.2 discards some control/data interface errors. Remember the
 // first one at the public interface boundary; never inspect its private state.
@@ -293,7 +302,6 @@ static void audio_cleanup(void) {
     s_sleeping = false;
     s_initialized = false;
     s_sleep_result = ESP_OK;
-    s_volume = 0;
     s_hz = 0;
     s_bits = 0;
     s_ch = 0;
@@ -303,6 +311,10 @@ static esp_err_t i2s_full_duplex_init(void) {
     i2s_chan_config_t chan = {
         .id = BSP_I2S_PORT,
         .role = I2S_ROLE_MASTER,
+        // DMA 缓冲保持 6x240。不要调大:reconfig_std_slot 在单/立体声切换时按
+        // desc_num*frame_size 一次性连续分配 DMA 内存,调大后(实测 12x480 需
+        // 连续 23KB)在堆碎片化时分配失败并引发 I2S 半配置 panic。网络电台的
+        // 抗抖动由 app_radio 的静态 PCM 环形缓冲承担,不在这里解决。
         .dma_desc_num = 6,
         .dma_frame_num = 240,
         .auto_clear_after_cb = true,
@@ -385,6 +397,8 @@ static esp_err_t audio_create_codec(void) {
 }
 
 esp_err_t bsp_audio_init(void) {
+    if (!s_api_lock) s_api_lock = xSemaphoreCreateMutex();
+    if (!s_api_lock) return ESP_ERR_NO_MEM;
     if (s_codec_release_failed) return ESP_ERR_INVALID_STATE;
     if (s_initialized) return ESP_OK;
     if (s_tx || s_rx || s_ctrl || s_data || s_codec || s_gpio) {
@@ -430,7 +444,7 @@ fail:
     return e;
 }
 
-esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch) {
+static esp_err_t audio_set_format_locked(uint32_t hz, uint8_t bits, uint8_t ch) {
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
     if (s_sleeping) return ESP_ERR_INVALID_STATE;
     if (s_opened && s_hz == hz && s_bits == bits && s_ch == ch) return ESP_OK;   // 同格式复用
@@ -447,10 +461,15 @@ esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch) {
     if (!s_dev && (e = audio_create_codec()) != ESP_OK) goto fail;
     s_io_error = ESP_CODEC_DEV_OK;
 
+    // channel_mask 必须与实际声道数匹配:esp_codec_dev 的 I2S 接口按掩码位数
+    // 决定 slot_mode(1 位=MONO)。立体声只给声道 0 会把 I2S 配成单声道,
+    // 交织的 LRLR 数据被逐样本消费,表现为 2 倍速变调(电台实测复现)。
     esp_codec_dev_sample_info_t fs = {
         .bits_per_sample = bits,
         .channel = ch,
-        .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
+        .channel_mask = (ch >= 2)
+            ? (ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) | ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1))
+            : ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0),
         .sample_rate = hz,
         .mclk_multiple = 0,          // 0 → 驱动按默认 256xfs 取 MCLK
     };
@@ -465,7 +484,8 @@ esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch) {
     //   驱动已按采样率与 MCLK 精确算好,覆写会导致 ADC/DAC 时序错乱、录音回放全是杂音。
     //   这里只设麦克风模拟 PGA 增益。
     r = esp_codec_dev_set_in_gain(s_dev, 30.0f);
-    if (r == ESP_CODEC_DEV_OK) r = esp_codec_dev_set_out_vol(s_dev, s_volume);
+    // 硬件 DAC 固定满幅:用户音量由 bsp_audio_write 的软件缩放控制(见 s_sw_gain)。
+    if (r == ESP_CODEC_DEV_OK) r = esp_codec_dev_set_out_vol(s_dev, 100);
     if (r != ESP_CODEC_DEV_OK || s_io_error != ESP_CODEC_DEV_OK) {
         e = ESP_FAIL;
         goto fail;
@@ -484,7 +504,14 @@ fail:
     return e == ESP_OK ? ESP_FAIL : e;
 }
 
-esp_err_t bsp_audio_sleep(void) {
+esp_err_t bsp_audio_set_format(uint32_t hz, uint8_t bits, uint8_t ch) {
+    xSemaphoreTake(s_api_lock, portMAX_DELAY);
+    esp_err_t r = audio_set_format_locked(hz, bits, ch);
+    xSemaphoreGive(s_api_lock);
+    return r;
+}
+
+static esp_err_t audio_sleep_locked(void) {
     if (!s_initialized) return ESP_OK;
     if (s_sleeping) return s_sleep_result;
 
@@ -506,7 +533,14 @@ esp_err_t bsp_audio_sleep(void) {
     return first_error;
 }
 
-esp_err_t bsp_audio_prepare_deep_sleep(void) {
+esp_err_t bsp_audio_sleep(void) {
+    xSemaphoreTake(s_api_lock, portMAX_DELAY);
+    esp_err_t r = audio_sleep_locked();
+    xSemaphoreGive(s_api_lock);
+    return r;
+}
+
+static esp_err_t audio_prepare_deep_sleep_locked(void) {
     esp_err_t first_error = audio_disable_i2s_channels();
     const int pins[] = {
         BSP_I2S_MCLK, BSP_I2S_BCLK, BSP_I2S_WS, BSP_I2S_DOUT, BSP_I2S_DIN,
@@ -533,12 +567,19 @@ esp_err_t bsp_audio_prepare_deep_sleep(void) {
     return first_error;
 }
 
-esp_err_t bsp_audio_wake(void) {
+esp_err_t bsp_audio_prepare_deep_sleep(void) {
+    xSemaphoreTake(s_api_lock, portMAX_DELAY);
+    esp_err_t r = audio_prepare_deep_sleep_locked();
+    xSemaphoreGive(s_api_lock);
+    return r;
+}
+
+static esp_err_t audio_wake_locked(void) {
     if (!s_initialized || !s_sleeping) return ESP_OK;
 
     // 允许内部格式设置重新 open codec；失败时再次 close，避免留下半唤醒状态。
     s_sleeping = false;
-    esp_err_t e = bsp_audio_set_format(s_hz ? s_hz : AUDIO_DEFAULT_HZ,
+    esp_err_t e = audio_set_format_locked(s_hz ? s_hz : AUDIO_DEFAULT_HZ,
                              s_bits ? s_bits : AUDIO_DEFAULT_BITS,
                              s_ch ? s_ch : AUDIO_DEFAULT_CH);
     if (e != ESP_OK) {
@@ -554,17 +595,73 @@ esp_err_t bsp_audio_wake(void) {
     return ESP_OK;
 }
 
+esp_err_t bsp_audio_wake(void) {
+    xSemaphoreTake(s_api_lock, portMAX_DELAY);
+    esp_err_t r = audio_wake_locked();
+    xSemaphoreGive(s_api_lock);
+    return r;
+}
+
+// 软件音量分块长度(字节)。播放调用方多为 1~2KB,分块后静态缓冲只需 1KB。
+// 16bit 采样逐点乘 Q15 增益右移 15 位;C3 无 FPU,整数乘加足够(48kHz 立体声
+// 约 9.6 万次/秒,占用可忽略)。
+#define SW_VOL_CHUNK_BYTES 1024
+static int16_t s_sw_buf[SW_VOL_CHUNK_BYTES / 2];
+
+static esp_err_t audio_write_scaled(const void *pcm, size_t bytes) {
+    const int32_t g = s_sw_gain;
+    if (g >= 32768) { // 满音量:零拷贝
+        return esp_codec_dev_write(s_dev, (void *)pcm, (int)bytes) == 0 ? ESP_OK : ESP_FAIL;
+    }
+    const uint8_t *src = (const uint8_t *)pcm;
+    while (bytes >= 2) {
+        size_t n = bytes < SW_VOL_CHUNK_BYTES ? bytes : SW_VOL_CHUNK_BYTES;
+        n &= ~(size_t)1; // 保证 16bit 对齐,避免拆半个采样
+        if (n == 0) break;
+        const int16_t *s = (const int16_t *)src;
+        const int cnt = (int)(n / 2);
+        for (int i = 0; i < cnt; i++) {
+            s_sw_buf[i] = (int16_t)(((int32_t)s[i] * g) >> 15);
+        }
+        if (esp_codec_dev_write(s_dev, s_sw_buf, (int)n) != 0) return ESP_FAIL;
+        src += n;
+        bytes -= n;
+    }
+    return ESP_OK;
+}
+
 esp_err_t bsp_audio_write(const void *pcm, size_t bytes) {
-    if (!s_dev || !s_opened || s_sleeping) return ESP_ERR_INVALID_STATE;
-    return esp_codec_dev_write(s_dev, (void *)pcm, bytes) == 0 ? ESP_OK : ESP_FAIL;
+    // 限时取锁:I2S 若因 DMA 停摆而阻塞在 esp_codec_dev_write 里,持锁任务会
+    // 永久占锁,任何 portMAX_DELAY 的调用者(音量设置/按键路径)会被一起卡死,
+    // 表现为"音量条不显示、OK 无法暂停"。宁可丢这一笔 PCM,也不锁死全系统。
+    if (xSemaphoreTake(s_api_lock, pdMS_TO_TICKS(500)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    esp_err_t r;
+    if (!s_dev || !s_opened || s_sleeping) {
+        r = ESP_ERR_INVALID_STATE;
+    } else {
+        r = audio_write_scaled(pcm, bytes);
+    }
+    xSemaphoreGive(s_api_lock);
+    return r;
 }
 
 esp_err_t bsp_audio_read(void *pcm, size_t bytes) {
-    if (!s_dev || !s_opened || s_sleeping) return ESP_ERR_INVALID_STATE;
-    return esp_codec_dev_read(s_dev, pcm, bytes) == 0 ? ESP_OK : ESP_FAIL;
+    if (xSemaphoreTake(s_api_lock, pdMS_TO_TICKS(500)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    esp_err_t r;
+    if (!s_dev || !s_opened || s_sleeping) {
+        r = ESP_ERR_INVALID_STATE;
+    } else {
+        r = esp_codec_dev_read(s_dev, pcm, bytes) == 0 ? ESP_OK : ESP_FAIL;
+    }
+    xSemaphoreGive(s_api_lock);
+    return r;
 }
 
 void bsp_audio_set_volume(uint8_t percent) {
-    s_volume = percent > 100 ? 100 : percent;
-    if (s_dev && s_opened && !s_sleeping) esp_codec_dev_set_out_vol(s_dev, s_volume);
+    if (percent > 100) percent = 100;
+    // 平方律 taper:50% → -12dB,30% → -21dB;100% 满幅(增益 1.0)。
+    int32_t g = ((int32_t)percent * percent * 32768 + 5000) / 10000;
+    if (g > 32768) g = 32768;
+    s_sw_gain = g;
+    ESP_LOGI(TAG, "音量 %u%% (软件增益 %ld/32768)", (unsigned)percent, (long)g);
 }

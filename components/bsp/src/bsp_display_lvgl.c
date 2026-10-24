@@ -9,7 +9,10 @@
 
 static const char *TAG = "bsp_lvgl";
 
-#define BSP_LVGL_DRAW_BUFFER_LINES 40
+// 行数权衡:40 行(19.2KB DMA 堆)时电台播放期空闲堆仅 ~7KB,lwIP/WiFi 收包缓冲
+// 分配失败导致 TCP 停顿数秒、音频持续欠载(诊断实测复现)。20 行(9.6KB)为网络栈
+// 腾出 ~9.6KB,全屏刷新多 8 次 flush(每次 ~2ms),UI 无感。
+#define BSP_LVGL_DRAW_BUFFER_LINES 20
 
 static lv_display_t *s_disp;
 static bool s_port_initialized;
