@@ -22,7 +22,7 @@ esp_err_t app_xiaozhi_init(void);
 
 // 进入页面:启动会话任务(幂等)。未连 Wi-Fi 返回 ESP_ERR_INVALID_STATE。
 esp_err_t app_xiaozhi_open(void);
-// 离开页面:断开并回收(阻塞等待任务退出,最长约 8 秒)。
+// 离开页面:断开并回收(阻塞等待任务退出,最长约 16 秒)。
 void app_xiaozhi_close(void);
 
 xz_state_t app_xiaozhi_state(void);

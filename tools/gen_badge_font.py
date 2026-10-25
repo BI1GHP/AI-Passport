@@ -33,11 +33,15 @@ ASCII_END = 0x7E
 
 DEFAULT_FONT = os.environ.get("BADGE_FONT_SOURCE", r"C:\Windows\Fonts\msyh.ttc")
 
+# 服务端回复是任意中文,标点不在源码里也必须覆盖,否则显示成方块。
+CJK_PUNCT = "，。！？；：、（）《》〈〉“”‘’…—～·「」『』【】〔〕　"
+
 
 def source_chars() -> set[str]:
     """Collect ASCII printable plus all non-ASCII characters in main/,
     plus GB2312 common Chinese chars (for runtime SSID etc.)."""
     chars = {chr(c) for c in range(ASCII_START, ASCII_END + 1)}
+    chars.update(c for c in CJK_PUNCT if ord(c) > ASCII_END)
     for directory in SRC_DIRS:
         for path in sorted(directory.rglob("*")):
             if path.suffix not in (".c", ".h") or OUT_DIR in path.parents:

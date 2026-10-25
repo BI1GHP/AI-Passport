@@ -139,7 +139,7 @@ static const char INDEX_HTML[] =
 
 "<div class=card><h2>小智AI</h2>"
 "<div class=item><label>小智AI服务器 OTA 地址(留空用官方)</label><div class=row>"
-"<input id=xzurl placeholder='https://api.tenclass.net/xz/ota/'>"
+"<input id=xzurl placeholder='https://api.tenclass.net/xiaozhi/ota/'>"
 "<button onclick=\"return sv('xzurl')\">保存</button><span class=st id=m_xzurl></span></div></div>"
 "</div>"
 

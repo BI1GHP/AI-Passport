@@ -27,6 +27,7 @@ idf_component_register(
          "page_card.c"
          "page_mail.c"
          "page_xiaozhi.c"
+         "xz_portrait.c"
          "page_radio.c"
          "page_recorder.c"
     INCLUDE_DIRS "."
