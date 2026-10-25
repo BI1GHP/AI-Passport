@@ -49,6 +49,8 @@ static const char *hint_text(xz_state_t st) {
     case XZ_ST_ACTIVATING: return "控制台添加设备并输入激活码";
     case XZ_ST_READY:      return "OK 开始说话 · 长按返回";
     case XZ_ST_LISTENING:  return "请说话 · OK 结束并发送";
+    case XZ_ST_THINKING:   return "OK 打断并说话 · 长按返回";
+    case XZ_ST_SPEAKING:   return "OK 打断并说话 · 长按返回";
     case XZ_ST_ERROR:      return "OK 重新连接 · 长按返回";
     default:               return "正在连接小智服务器…";
     }
@@ -279,7 +281,8 @@ static void xz_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
     if (ev != BSP_BTN_CLICK || btn != BSP_BTN_OK) return;
     xz_state_t st = app_xiaozhi_state();
     ESP_LOGI("page_xiaozhi", "OK 键,当前状态 %d", (int)st);
-    if (st == XZ_ST_READY || st == XZ_ST_LISTENING) {
+    if (st == XZ_ST_READY || st == XZ_ST_LISTENING ||
+        st == XZ_ST_THINKING || st == XZ_ST_SPEAKING) {
         app_xiaozhi_talk_toggle();
     } else if (st == XZ_ST_ERROR || st == XZ_ST_IDLE) {
         app_xiaozhi_close();

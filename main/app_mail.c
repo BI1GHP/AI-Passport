@@ -79,36 +79,24 @@ static bool send_all(esp_tls_t *tls, const char *data) {
 // 读到响应标签(A1 OK / A1 NO / A1 BAD)为止。
 static bool read_until_tag(esp_tls_t *tls, char *buf, size_t cap, size_t *used,
                            const char *tag, bool *ok) {
-    const size_t tag_len = strlen(tag);
-    char marker[16];
-    snprintf(marker, sizeof(marker), "\r\n%s ", tag);
     int timeouts = 0;
     for (;;) {
         if (s_stop) return false;
-        if (*used + 1 < cap) {
-            ssize_t n = esp_tls_conn_read(tls, buf + *used, cap - 1 - *used);
-            if (n > 0) {
-                *used += (size_t)n;
-                buf[*used] = '\0';
-                const char *hit = strstr(buf, marker);
-                if (hit) {
-                    const char *code = hit + tag_len + 2;
-                    *ok = strncmp(code, "OK", 2) == 0;
-                    return true;
-                }
-                timeouts = 0;
-                continue;
-            }
-            if (n == 0) return false;
-        } else {
-            return false; // 响应过大
+        if (imap_find_tag_status(buf, *used, tag, ok)) return true;
+        if (*used + 1 >= cap) return false; // 响应过大
+        ssize_t n = esp_tls_conn_read(tls, buf + *used, cap - 1 - *used);
+        if (n > 0) {
+            *used += (size_t)n;
+            timeouts = 0;
+            continue;
         }
+        if (n == 0) return false;
         if (++timeouts > 1 + (READ_TIMEOUT_S * 2)) return false;
     }
 }
 
 static bool read_greeting(esp_tls_t *tls) {
-    char buf[128];
+    char buf[256];
     size_t used = 0;
     for (int i = 0; i < 8; i++) {
         if (s_stop) return false;
@@ -208,6 +196,14 @@ static void mail_task(void *arg) {
         goto release_net;
     }
 
+    // 163/126 等服务端要求客户端先声明身份(RFC 2971),否则 SELECT 返回 NO Unsafe Login。
+    // 只在 QQ/163 上发送;Gmail/Outlook 不需要且不保证支持。
+    if (p == &PROVIDERS[0] || p == &PROVIDERS[1]) {
+        send_all(tls, "A0 ID (\"name\" \"FoloToy Passport\" \"version\" \"1.0\" \"vendor\" \"FoloToy\")\r\n");
+        used = 0;
+        read_until_tag(tls, buf, MAIL_BUF_SIZE, &used, "A0", &ok);
+    }
+
     used = 0;
     if (!send_all(tls, "A2 SELECT \"INBOX\"\r\n") ||
         !read_until_tag(tls, buf, MAIL_BUF_SIZE, &used, "A2", &ok) || !ok) {
@@ -286,4 +282,14 @@ int app_mail_copy(imap_msg_t *out, int max, esp_err_t *err) {
         *err = ESP_FAIL;
     }
     return n;
+}
+
+void app_mail_delete(int index) {
+    if (!s_lock || index < 0) return;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) return;
+    if (index < s_count) {
+        for (int i = index; i + 1 < s_count; i++) s_msgs[i] = s_msgs[i + 1];
+        s_count--;
+    }
+    xSemaphoreGive(s_lock);
 }

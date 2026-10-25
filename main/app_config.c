@@ -26,6 +26,7 @@ static void config_defaults(void) {
     strcpy(s_cfg.mail_provider, "qq");
     s_cfg.radio_region = 1; // 默认中国台,全球榜在国内多不可达
     s_cfg.volume = 70;
+    s_cfg.screen_off = 1; // 默认 1 分钟待机息屏
 }
 
 // 键存在且非空时覆盖默认值。
@@ -71,10 +72,12 @@ esp_err_t app_config_load(void) {
     load_str(h, "mpass", s_cfg.mail_pass, sizeof(s_cfg.mail_pass));
     load_u8(h, "rregion", &s_cfg.radio_region);
     load_u8(h, "vol", &s_cfg.volume);
+    load_u8(h, "soff", &s_cfg.screen_off);
     load_str(h, "xzurl", s_cfg.xz_server, sizeof(s_cfg.xz_server));
     nvs_close(h);
     if (s_cfg.theme > 2) s_cfg.theme = 0;
     if (s_cfg.volume > 100) s_cfg.volume = 70;
+    if (s_cfg.screen_off >= APP_CFG_SCREEN_OFF_MODES) s_cfg.screen_off = 1;
     return ESP_OK;
 }
 
@@ -98,6 +101,7 @@ esp_err_t app_config_save(void) {
     nvs_set_str(h, "mpass", s_cfg.mail_pass);
     nvs_set_u8(h, "rregion", s_cfg.radio_region);
     nvs_set_u8(h, "vol", s_cfg.volume);
+    nvs_set_u8(h, "soff", s_cfg.screen_off);
     nvs_set_str(h, "xzurl", s_cfg.xz_server);
     e = nvs_commit(h);
     nvs_close(h);
@@ -112,4 +116,22 @@ app_config_t *app_config(void) {
 
 uint32_t app_config_generation(void) {
     return s_gen;
+}
+
+uint32_t app_config_screen_off_seconds(void) {
+    switch (s_cfg.screen_off) {
+    case 0: return 30;
+    case 1: return 60;
+    case 2: return 300;
+    default: return 0; // 不息屏
+    }
+}
+
+const char *app_config_screen_off_name(void) {
+    switch (s_cfg.screen_off) {
+    case 0: return "30 秒";
+    case 1: return "1 分钟";
+    case 2: return "5 分钟";
+    default: return "不息屏";
+    }
 }

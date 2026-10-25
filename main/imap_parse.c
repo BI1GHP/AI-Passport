@@ -46,6 +46,35 @@ int imap_parse_exists(const char *data, size_t len) {
     return best;
 }
 
+// 状态码是否 OK(状态码只有 OK/NO/BAD,后接空格、行尾或 "[")。
+static bool status_is_ok(const char *s, size_t len) {
+    if (len < 2) return false;
+    if (lower_ascii(s[0]) != 'o' || lower_ascii(s[1]) != 'k') return false;
+    if (len == 2) return true;
+    return s[2] == ' ' || s[2] == '\t' || s[2] == '\r' || s[2] == '\n' || s[2] == '[';
+}
+
+bool imap_find_tag_status(const char *data, size_t len, const char *tag, bool *ok) {
+    if (!data || !tag || !tag[0]) return false;
+    const size_t tag_len = strlen(tag);
+    size_t i = 0;
+    while (i < len) {
+        if (i + tag_len < len && memcmp(data + i, tag, tag_len) == 0 &&
+            data[i + tag_len] == ' ') {
+            size_t p = i + tag_len + 1;
+            while (p < len && (data[p] == ' ' || data[p] == '\t')) p++;
+            size_t start = p;
+            while (p < len && data[p] != '\r' && data[p] != '\n') p++;
+            if (ok) *ok = status_is_ok(data + start, p - start);
+            return true;
+        }
+        const char *nl = memchr(data + i, '\n', len - i);
+        if (!nl) break;
+        i = (size_t)(nl - data) + 1;
+    }
+    return false;
+}
+
 static int b64_value(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
@@ -116,13 +145,14 @@ size_t imap_decode_mime_words(const char *in, char *out, size_t out_size) {
             out[written++] = in[i++];
             continue;
         }
-        const char *q2 = strchr(q1 + 1, '?');
-        if (!q2 || q2[1] == '\0' || q2[2] != '=') {
+        // q1 指向 charset 后的 '?',其后一个字符是编码 B/Q,再后是正文起点。
+        const char *text = q1 + 3;
+        const char *q2 = strchr(text, '?');
+        if (!q2 || q2[1] != '=') {
             out[written++] = in[i++];
             continue;
         }
         char enc = lower_ascii(q1[1]);
-        const char *text = q2 + 1;
         size_t text_len = (size_t)(q2 - text);
         size_t n = 0;
         if (enc == 'b') {
@@ -134,7 +164,7 @@ size_t imap_decode_mime_words(const char *in, char *out, size_t out_size) {
             continue;
         }
         written += n;
-        i = (size_t)(q2 + 3 - in);
+        i = (size_t)(q2 + 2 - in); // 跳过结尾的 "?="
         // 相邻 encoded-word 之间的空白按 RFC 2047 丢弃
         size_t j = i;
         while (in[j] == ' ' || in[j] == '\t') j++;

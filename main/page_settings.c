@@ -10,7 +10,7 @@
 #include "bsp_display.h"
 #include "esp_log.h"
 
-#define ROW_COUNT 3
+#define ROW_COUNT 4
 
 static lv_obj_t *s_scr;
 static lv_obj_t *s_rows[ROW_COUNT];
@@ -42,6 +42,7 @@ static void refresh(void) {
     } else {
         lv_label_set_text_fmt(s_lbl[2], "Wi-Fi  连接中 %s", c->wifi_ssid);
     }
+    lv_label_set_text_fmt(s_lbl[3], "待机息屏  %s", app_config_screen_off_name());
     for (int i = 0; i < ROW_COUNT; i++) {
         app_ui_row_style(s_rows[i], s_lbl[i], i == s_sel);
     }
@@ -102,6 +103,12 @@ static void cycle_theme(void) {
     app_config_save();
 }
 
+static void cycle_screen_off(void) {
+    app_config_t *c = app_config();
+    c->screen_off = (uint8_t)((c->screen_off + 1) % APP_CFG_SCREEN_OFF_MODES);
+    app_config_save();
+}
+
 static void settings_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
     if (ev != BSP_BTN_CLICK) return;
     if (btn == BSP_BTN_OK) {
@@ -115,9 +122,11 @@ static void settings_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
                 bsp_lvgl_unlock();
             }
             return;
-        } else {
+        } else if (s_sel == 2) {
             app_nav_open(page_wifi());
             return;
+        } else {
+            cycle_screen_off();
         }
         if (bsp_lvgl_lock(200)) {
             refresh();

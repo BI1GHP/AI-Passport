@@ -16,3 +16,6 @@ bool app_mail_busy(void);
 
 // 复制当前结果;返回邮件数。err 返回最近一次任务结果(ESP_OK 或失败码)。
 int app_mail_copy(imap_msg_t *out, int max, esp_err_t *err);
+
+// 删除本地快照中的一条(不改服务器端邮件);index 越界时忽略。
+void app_mail_delete(int index);

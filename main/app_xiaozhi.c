@@ -223,6 +223,25 @@ static bool wait_or_close(TickType_t ticks) {
     return ev.type == EV_CLOSE;
 }
 
+// 打断时丢弃队列里已排队的下行音频帧,避免静音后又被旧 TTS 帧续上。
+// 控制类事件暂存后按原顺序放回;队列只有 XZ_QUEUE_LEN 个槽,局部数组足够。
+static void purge_audio_events(void) {
+    if (!s_q) return;
+    xz_evt_t keep[XZ_QUEUE_LEN];
+    int n = 0;
+    xz_evt_t ev;
+    while (n < XZ_QUEUE_LEN && xQueueReceive(s_q, &ev, 0) == pdTRUE) {
+        if (ev.type == EV_WS_BIN) {
+            free(ev.data);
+        } else {
+            keep[n++] = ev;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        if (xQueueSendToBack(s_q, &keep[i], 0) != pdTRUE) free(keep[i].data);
+    }
+}
+
 // ---- 会话主任务 ----
 static void xz_task(void *arg) {
     (void)arg;
@@ -341,6 +360,18 @@ connect:
                     ws_send_text(ws, "{\"type\":\"listen\",\"state\":\"stop\"}");
                     set_state(XZ_ST_THINKING);
                     think_ticks = 0;
+                } else if ((s_state == XZ_ST_THINKING || s_state == XZ_ST_SPEAKING) && ws_ready) {
+                    // 打断:先让服务器中止当前回复,再直接开一轮新的聆听。
+                    // 之后到达的旧 TTS 帧/文本因状态已是 LISTENING 而被丢弃。
+                    ESP_LOGI(TAG, "按键打断,开始新一轮聆听");
+                    purge_audio_events(); // 先丢掉已排队的旧回复音频
+                    ws_send_text(ws, "{\"type\":\"abort\"}");
+                    ws_send_text(ws, "{\"type\":\"listen\",\"state\":\"start\",\"mode\":\"manual\"}");
+                    if (s_state == XZ_ST_SPEAKING) {
+                        // 播放路径是 24k,切回 16k 同时关闭再打开 codec,清掉已排队的下行 PCM
+                        bsp_audio_set_format(XZ_RATE, 16, 1);
+                    }
+                    set_state(XZ_ST_LISTENING);
                 }
                 break;
             case EV_WS_CONNECTED:
@@ -545,7 +576,11 @@ xz_state_t app_xiaozhi_state(void) {
 
 esp_err_t app_xiaozhi_talk_toggle(void) {
     if (!s_running) return ESP_ERR_INVALID_STATE;
-    if (s_state != XZ_ST_READY && s_state != XZ_ST_LISTENING) return ESP_ERR_INVALID_STATE;
+    // 思考中/回复中也允许切换(相当于打断当前回复,开始新一轮聆听)
+    if (s_state != XZ_ST_READY && s_state != XZ_ST_LISTENING &&
+        s_state != XZ_ST_THINKING && s_state != XZ_ST_SPEAKING) {
+        return ESP_ERR_INVALID_STATE;
+    }
     return post_evt(EV_TALK_TOGGLE, NULL, 0) ? ESP_OK : ESP_ERR_NO_MEM;
 }
 

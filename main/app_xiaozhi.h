@@ -27,6 +27,7 @@ void app_xiaozhi_close(void);
 
 xz_state_t app_xiaozhi_state(void);
 // 说话开关:READY→LISTENING 返回 ESP_OK;LISTENING→发送并进入 THINKING。
+// THINKING/SPEAKING 下调用表示打断当前回复,直接开始新一轮聆听。
 esp_err_t app_xiaozhi_talk_toggle(void);
 
 // ACTIVATING 状态下的 6 位激活码;无则返回空串。

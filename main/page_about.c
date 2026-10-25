@@ -15,7 +15,7 @@ static void about_enter(void) {
     lv_obj_t *a = app_ui_label(p, "电子工牌", app_font_cjk_16(), false);
     lv_obj_align(a, LV_ALIGN_TOP_MID, 0, 12);
 
-    lv_obj_t *b = app_ui_label(p, "版本号:V1.01", app_font_cjk_14(), false);
+    lv_obj_t *b = app_ui_label(p, "版本号:V1.02", app_font_cjk_14(), false);
     lv_obj_align(b, LV_ALIGN_TOP_MID, 0, 46);
 
     lv_obj_t *c = app_ui_label(p, "制作者:BI1GHP", app_font_cjk_14(), false);

@@ -130,6 +130,32 @@ void app_nav_back(void) {
     }
 }
 
+// ---- 待机息屏:超过设定时间无按键则关闭背光,任意按键唤醒并吞掉该次手势 ----
+#define SCREEN_ON_BACKLIGHT 80
+#define IDLE_CHECK_MS 1000
+
+static volatile uint32_t s_activity_gen; // 每次按键事件 +1,供 LVGL 任务无锁检测
+static volatile bool s_screen_off;
+static int64_t s_wake_ignore_until_us;   // 唤醒后短时忽略本次手势剩余事件
+static uint32_t s_idle_gen;
+static uint32_t s_idle_sec;
+
+static void idle_timer_cb(lv_timer_t *t) {
+    (void)t;
+    uint32_t gen = s_activity_gen;
+    if (gen != s_idle_gen) {
+        s_idle_gen = gen;
+        s_idle_sec = 0;
+        return;
+    }
+    uint32_t limit = app_config_screen_off_seconds();
+    if (s_screen_off || limit == 0) return;
+    if (++s_idle_sec >= limit) {
+        s_screen_off = true;
+        bsp_display_backlight(0);
+    }
+}
+
 // ---- 按键:ADC 回调入队,独立任务消费 ----
 typedef struct { bsp_btn_t btn; bsp_btn_ev_t ev; } key_evt_t;
 static QueueHandle_t s_key_q;
@@ -147,22 +173,33 @@ static void on_button(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
     // 忽略 RELEASE(深睡唤醒用)
     if (ev == BSP_BTN_RELEASE) return;
 
+    int64_t now_us = esp_timer_get_time();
+    // 息屏时按键只用于唤醒,并在短窗口内吞掉本次手势(按下/抬起顺序差一点也没关系)。
+    if (s_screen_off) {
+        s_screen_off = false;
+        s_activity_gen++;
+        bsp_display_backlight(SCREEN_ON_BACKLIGHT);
+        s_wake_ignore_until_us = now_us + 400000;
+        return;
+    }
+    if (now_us < s_wake_ignore_until_us) return;
+    s_activity_gen++;
+
     // 双击检测分两条互斥路径,覆盖不同节奏:
     // 1) 快速双击(按下间隔 <260ms):iot_button 内部识别为原生 DOUBLE,此时不产生
     //    任何 CLICK 事件,直接透传 → 调音量。
     // 2) 较慢双击(260ms~350ms):iot_button 拆成两个独立 CLICK,由下方自定义窗口
     //    配对成 DOUBLE。两条路径天然互斥,不会重复触发。
     if (ev == BSP_BTN_CLICK && (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN)) {
-        int64_t now = esp_timer_get_time();
         int64_t *last = (btn == BSP_BTN_UP) ? &s_last_up_click_us : &s_last_down_click_us;
-        if (now - *last < DOUBLE_CLICK_WINDOW_US) {
+        if (now_us - *last < DOUBLE_CLICK_WINDOW_US) {
             // 第二次点击在窗口内 → 视为双击(调音量),不入队单击
             *last = 0; // 重置,避免三连击误触
             key_evt_t e = { .btn = btn, .ev = BSP_BTN_DOUBLE };
             if (s_key_q) xQueueSend(s_key_q, &e, 0);
             return;
         }
-        *last = now;
+        *last = now_us;
     }
 
     key_evt_t e = { .btn = btn, .ev = ev };
@@ -250,6 +287,12 @@ void app_main(void) {
     s_stack[s_depth++] = page_home();
     if (bsp_lvgl_lock(500)) { page_home()->enter(); bsp_lvgl_unlock(); }
     app_boot_end();
+
+    if (bsp_lvgl_lock(200)) {
+        s_idle_gen = s_activity_gen;
+        lv_timer_create(idle_timer_cb, IDLE_CHECK_MS, NULL);
+        bsp_lvgl_unlock();
+    }
 
     xTaskCreatePinnedToCore(input_task, "input", 4096, NULL, 5, NULL, 0);
 

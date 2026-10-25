@@ -14,6 +14,31 @@
         }                                                                 \
     } while (0)
 
+static void test_tag_status(void) {
+    bool ok = false;
+    const char *a1 = "A1 OK LOGIN completed\r\n";
+    CHECK(imap_find_tag_status(a1, strlen(a1), "A1", &ok));
+    CHECK(ok);
+
+    const char *a2 = "* CAPABILITY IMAP4rev1\r\nA2 NO [AUTHENTICATIONFAILED] bad\r\n";
+    ok = true;
+    CHECK(imap_find_tag_status(a2, strlen(a2), "A2", &ok));
+    CHECK(!ok);
+
+    const char *a3 = "* 5 EXISTS\r\n* OK [READ-WRITE] done\r\nA3 OK FETCH done\r\n";
+    ok = false;
+    CHECK(imap_find_tag_status(a3, strlen(a3), "A3", &ok));
+    CHECK(ok);
+
+    const char *bad = "A9 BAD nonsense\r\n";
+    ok = true;
+    CHECK(imap_find_tag_status(bad, strlen(bad), "A9", &ok));
+    CHECK(!ok);
+
+    const char *missing = "* 1 FETCH (FLAGS (\\Seen))\r\nA4 OK done\r\n";
+    CHECK(!imap_find_tag_status(missing, strlen(missing), "A7", NULL));
+}
+
 static void test_exists(void) {
     const char *resp = "* 12 EXISTS\r\n* 0 RECENT\r\nA2 OK SELECT done\r\n";
     CHECK(imap_parse_exists(resp, strlen(resp)) == 12);
@@ -73,6 +98,7 @@ static void test_fetch_limit(void) {
 }
 
 int main(void) {
+    test_tag_status();
     test_exists();
     test_decode();
     test_fetch();

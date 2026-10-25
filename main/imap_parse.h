@@ -1,6 +1,7 @@
 // main/imap_parse.h —— IMAP 响应解析 + MIME encoded-word 解码(纯逻辑,可主机测试)。
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -16,6 +17,10 @@ typedef struct {
 
 // 返回 "* <n> EXISTS" 中最大的 n;没有则 0。
 int imap_parse_exists(const char *data, size_t len);
+
+// 在 IMAP 响应中查找标签行(tag + SP,行首可为缓冲区开头或 '\n' 之后)。
+// 找到返回 true,并把 *ok 置为该行状态码是否为 OK(A1 OK ... / A1 NO ...)。
+bool imap_find_tag_status(const char *data, size_t len, const char *tag, bool *ok);
 
 // 从 FETCH 响应(含 {n} literal)中提取 From/Subject/Date。
 // 返回写入 out 的邮件数(最多 max 条)。

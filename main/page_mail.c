@@ -22,6 +22,7 @@ static lv_obj_t *s_detail;
 static lv_obj_t *s_d_from;
 static lv_obj_t *s_d_subj;
 static lv_obj_t *s_d_date;
+static lv_obj_t *s_del_hint;
 static lv_timer_t *s_poll;
 
 static imap_msg_t s_msgs[ROW_COUNT];
@@ -49,6 +50,7 @@ static void show_detail(void) {
     lv_obj_set_hidden(s_rows[0], true);
     for (int i = 0; i < ROW_COUNT; i++) lv_obj_set_hidden(s_rows[i], true);
     lv_obj_set_hidden(s_status, true);
+    lv_obj_set_hidden(s_del_hint, true);
     lv_obj_set_hidden(s_detail, false);
     lv_label_set_text(s_d_from, s_msgs[s_sel].from);
     lv_label_set_text(s_d_subj, s_msgs[s_sel].subject[0] ? s_msgs[s_sel].subject : "(无主题)");
@@ -59,7 +61,19 @@ static void show_list(void) {
     s_state = STATE_LIST;
     lv_obj_set_hidden(s_detail, true);
     lv_obj_set_hidden(s_status, false);
+    lv_obj_set_hidden(s_del_hint, false);
     update_rows();
+}
+
+static void delete_selected(void) {
+    if (s_count <= 0) return;
+    app_mail_delete(s_sel);
+    esp_err_t err = ESP_OK;
+    s_count = app_mail_copy(s_msgs, ROW_COUNT, &err);
+    (void)err;
+    if (s_sel >= s_count) s_sel = s_count > 0 ? s_count - 1 : 0;
+    show_list();
+    lv_label_set_text(s_status, s_count == 0 ? "收件箱为空" : "");
 }
 
 static void poll_cb(lv_timer_t *t) {
@@ -85,7 +99,7 @@ static void poll_cb(lv_timer_t *t) {
         return;
     }
     s_count = n;
-    memcpy(s_msgs, msgs, sizeof(msgs));
+    if (n > 0) memcpy(s_msgs, msgs, (size_t)n * sizeof(imap_msg_t));
     if (n == 0) {
         lv_label_set_text(s_status, "收件箱为空");
     } else {
@@ -119,6 +133,11 @@ static void mail_enter(void) {
         lv_obj_align(s_subj[i], LV_ALIGN_TOP_LEFT, 4, 18);
     }
 
+    s_del_hint = app_ui_label(s_scr, "长按上/下键删除本地邮件", app_font_cjk_14(), true);
+    lv_obj_set_width(s_del_hint, 224);
+    lv_obj_set_style_text_align(s_del_hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_del_hint, LV_ALIGN_BOTTOM_MID, 0, -6);
+
     s_detail = app_ui_panel(s_scr, 214, 236);
     lv_obj_align(s_detail, LV_ALIGN_TOP_MID, 0, 40);
     lv_obj_set_style_pad_all(s_detail, 8, 0);
@@ -140,7 +159,7 @@ static void mail_enter(void) {
     lv_obj_set_width(s_d_date, 190);
     lv_label_set_long_mode(s_d_date, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_align(s_d_date, LV_ALIGN_TOP_LEFT, 0, 172);
-    lv_obj_t *tip = app_ui_label(s_detail, "OK 返回列表", app_font_cjk_14(), true);
+    lv_obj_t *tip = app_ui_label(s_detail, "OK 返回  长按上/下删除", app_font_cjk_14(), true);
     lv_obj_align(tip, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_hidden(s_detail, true);
 
@@ -158,6 +177,7 @@ static void mail_exit(void) {
         lv_obj_delete(s_scr);
         s_scr = NULL;
         s_status = s_detail = NULL;
+        s_del_hint = NULL;
         memset(s_rows, 0, sizeof(s_rows));
     }
 }
@@ -173,6 +193,14 @@ static esp_err_t mail_stop(void) {
 }
 
 static void mail_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
+    // 长按上/下:删除当前选中邮件的本地快照(不改服务器)。
+    if (ev == BSP_BTN_LONG && (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN)) {
+        if (bsp_lvgl_lock(200)) {
+            delete_selected();
+            bsp_lvgl_unlock();
+        }
+        return;
+    }
     if (ev != BSP_BTN_CLICK) return;
     if (s_state == STATE_DETAIL) {
         if (btn == BSP_BTN_OK && bsp_lvgl_lock(200)) {

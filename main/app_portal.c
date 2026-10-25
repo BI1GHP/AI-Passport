@@ -145,7 +145,7 @@ static const char INDEX_HTML[] =
 
 "<div class=card><h2>录音文件</h2><span class=st id=m_rec></span><div id=recs>加载中…</div></div>"
 "<div style='text-align:center;color:#999;font-size:12px;margin:14px 0'>"
-"电子工牌 V1.01 · 制作者 BI1GHP</div>"
+"电子工牌 V1.02 · 制作者 BI1GHP</div>"
 
 "<script>"
 "function stm(k,t){const m=document.getElementById('m_'+k);"
