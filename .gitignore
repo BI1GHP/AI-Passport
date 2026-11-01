@@ -1,9 +1,14 @@
-build/
+# ESP-IDF build directories (build/, build2/, build_xz/ ...)
+build*/
 sdkconfig
 sdkconfig.old
 managed_components/
 .vscode/
 .idea/
+
+# Python caches from tools/*.py
+__pycache__/
+*.pyc
 
 # Generated repository-local links; canonical skill sources live in skills/.
 /.agents/skills/passport-develop
