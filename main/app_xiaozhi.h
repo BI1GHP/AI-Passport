@@ -34,3 +34,11 @@ esp_err_t app_xiaozhi_talk_toggle(void);
 const char *app_xiaozhi_activation_code(void);
 // 最近一条服务器文本(识别结果/回复),拷贝到 buf。
 void app_xiaozhi_last_text(char *buf, size_t len);
+// 最近一条 STT 识别文本(仅 stt 消息,语音录入待办用),拷贝到 buf。
+void app_xiaozhi_last_stt(char *buf, size_t len);
+// 清除 STT 缓存(开始新一次语音录入前调用)。
+void app_xiaozhi_clear_stt(void);
+// 打断当前回复(发送 abort);仅 THINKING/SPEAKING 下有效。
+void app_xiaozhi_abort(void);
+// 回复音频实时强度 0..100(口型同步用);非 SPEAKING 状态恒 0。
+uint8_t app_xiaozhi_talk_level(void);

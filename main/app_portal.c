@@ -27,6 +27,7 @@
 static const char *TAG = "app_portal";
 
 #define UPLOAD_MAX_BYTES (400 * 1024) // 相片/二维码上限(浏览器已缩放)
+#define BOOT_SND_MAX_BYTES (200 * 1024) // 开机提示音 MP3 上限
 #define RECV_BUF 2048
 
 static httpd_handle_t s_server;
@@ -115,6 +116,16 @@ static const char INDEX_HTML[] =
 "<button class=up onclick=\"return up('fq','qr_qsl')\">上传 QSL 二维码</button>"
 "<span class=st id=m_qr_qsl></span></div></div>"
 
+"<div class=card><h2>开机提示音</h2>"
+"<div class=item><label>MP3 文件(≤200KB,开机自动播放一次)</label>"
+"<input type=file id=fs accept='audio/mpeg,.mp3'>"
+"<button class=up onclick=\"return upSnd()\">上传提示音</button>"
+"<span class=st id=m_boot></span></div>"
+"<div class=item><label>当前提示音</label><div class=row>"
+"<span id=bootinfo style='font-size:13px;color:#555'>查询中…</span>"
+"<button onclick=\"return delSnd()\">删除</button>"
+"<span class=st id=m_boot2></span></div></div></div>"
+
 "<div class=card><h2>邮箱</h2>"
 "<div class=item><label>服务商</label><div class=row>"
 "<select id=mail_provider><option value=qq>QQ 邮箱</option>"
@@ -176,6 +187,15 @@ static const char INDEX_HTML[] =
 "headers:{'Content-Type':'image/jpeg'},body:b})"
 ".then(r=>r.text()).then(t=>stm(name,t)).catch(()=>stm(name,'上传失败')),'image/jpeg',.88);};"
 "img.src=URL.createObjectURL(fi.files[0]);return false}"
+"function upSnd(){const fi=document.getElementById('fs');if(!fi.files[0])return false;"
+"const f=fi.files[0];if(f.size>200*1024){stm('boot','文件超过 200KB');return false}"
+"fetch('/api/upload?name=boot',{method:'POST',headers:{'Content-Type':'audio/mpeg'},body:f})"
+".then(r=>r.text()).then(t=>{stm('boot',t);loadBoot()}).catch(()=>stm('boot','上传失败'));return false}"
+"function loadBoot(){fetch('/api/boot/info').then(r=>r.json()).then(j=>{"
+"document.getElementById('bootinfo').textContent=j.size?('已上传 '+(j.size/1024).toFixed(1)+' KB'):'未设置(开机无提示音)';}).catch(()=>{})}"
+"function delSnd(){if(!confirm('删除开机提示音?'))return false;"
+"fetch('/api/upload?name=boot&del=1',{method:'POST'}).then(r=>r.text())"
+".then(t=>{stm('boot2',t);loadBoot()}).catch(()=>stm('boot2','删除失败'));return false}"
 "function loadRecs(){fetch('/api/rec/list').then(r=>r.json()).then(a=>{"
 "const d=document.getElementById('recs');"
 "d.innerHTML=a.length?a.map(x=>`<div class=rec><a href='/rec/${x.n}'>${x.n}</a>"
@@ -184,6 +204,7 @@ static const char INDEX_HTML[] =
 "fetch('/api/rec/del?name='+encodeURIComponent(n),{method:'POST'})"
 ".then(r=>r.text()).then(t=>{stm('rec',t);loadRecs()}).catch(()=>stm('rec','删除失败'));return false}"
 "loadRecs();"
+"loadBoot();"
 "</script></body></html>";
 
 // ---------------------------------------------------------------------------
@@ -345,21 +366,35 @@ static esp_err_t h_upload(httpd_req_t *req) {
     else if (strcmp(name, "photo") == 0)   rel = "photo.jpg";
     else if (strcmp(name, "qr_card") == 0) rel = "qr_card.jpg";
     else if (strcmp(name, "qr_qsl") == 0)  rel = "qr_qsl.jpg";
+    else if (strcmp(name, "boot") == 0)    rel = "boot.mp3"; // 开机提示音
     else {
         send_text(req, "未知图片类型");
         return ESP_FAIL;
     }
+    const bool is_boot = strcmp(name, "boot") == 0;
     if (!app_store_ready()) {
         send_text(req, "存储不可用");
-        return ESP_FAIL;
-    }
-    if (req->content_len > UPLOAD_MAX_BYTES) {
-        send_text(req, "图片过大(上限 400KB)");
         return ESP_FAIL;
     }
 
     char path[64];
     app_store_path(path, sizeof(path), rel);
+
+    // 支持删除(?del=1),用于清除已上传的提示音
+    char delflag[8] = { 0 };
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "del", delflag, sizeof(delflag)) == ESP_OK &&
+        delflag[0] == '1') {
+        remove(path);
+        send_text(req, "已删除");
+        return ESP_OK;
+    }
+
+    if (req->content_len > (is_boot ? BOOT_SND_MAX_BYTES : UPLOAD_MAX_BYTES)) {
+        send_text(req, is_boot ? "提示音过大(上限 200KB)" : "图片过大(上限 400KB)");
+        return ESP_FAIL;
+    }
+
     FILE *f = fopen(path, "wb");
     if (!f) {
         send_text(req, "文件打开失败");
@@ -396,6 +431,26 @@ static esp_err_t h_upload(httpd_req_t *req) {
     }
     ESP_LOGI(TAG, "已保存 %s(%d 字节)", path, total);
     send_text(req, "上传成功,返回设备页面即可看到");
+    return ESP_OK;
+}
+
+// GET /api/boot/info → {"size":N},0 表示未设置开机提示音
+static esp_err_t h_boot_info(httpd_req_t *req) {
+    long sz = 0;
+    if (app_store_ready()) {
+        char path[64];
+        app_store_path(path, sizeof(path), "boot.mp3");
+        FILE *f = fopen(path, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            sz = ftell(f);
+            fclose(f);
+        }
+    }
+    char buf[40];
+    snprintf(buf, sizeof(buf), "{\"size\":%ld}", sz);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, buf);
     return ESP_OK;
 }
 
@@ -523,6 +578,7 @@ esp_err_t app_portal_start(void) {
         { .uri = "/api/config",   .method = HTTP_GET,  .handler = h_config_get },
         { .uri = "/api/save",     .method = HTTP_POST, .handler = h_save },
         { .uri = "/api/upload",   .method = HTTP_POST, .handler = h_upload },
+        { .uri = "/api/boot/info",.method = HTTP_GET,  .handler = h_boot_info },
         { .uri = "/api/rec/list", .method = HTTP_GET,  .handler = h_rec_list },
         { .uri = "/api/rec/del",  .method = HTTP_POST, .handler = h_rec_del },
         { .uri = "/rec/*",        .method = HTTP_GET,  .handler = h_rec_get },

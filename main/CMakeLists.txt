@@ -18,6 +18,7 @@ idf_component_register(
          "imap_parse.c"
          "fonts/badge_font_14.c"
          "fonts/badge_font_16.c"
+         "fonts/badge_font_22.c"
          "page_home.c"
          "page_menu.c"
          "page_about.c"
@@ -31,6 +32,7 @@ idf_component_register(
          "page_radio.c"
          "page_recorder.c"
     INCLUDE_DIRS "."
+    EMBED_TXTFILES "news_ca.pem" "xz_ca.pem"
     REQUIRES bsp esp_event esp_hw_support esp_netif esp_timer esp_wifi nvs_flash
              fatfs wear_levelling esp_http_server esp_http_client esp-tls json lwip
              chmorgan__esp-libhelix-mp3 espressif__esp_websocket_client espressif__esp_audio_codec

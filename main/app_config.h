@@ -33,10 +33,15 @@ typedef struct {
     char mail_user[APP_CFG_USER_LEN];
     char mail_pass[APP_CFG_PASS_LEN];
     uint8_t radio_region;                 // 电台地区索引(0=全球热门)
+    uint8_t radio_style;                  // 电台界面风格:0=LED 1=液晶
     uint8_t volume;                       // 播放音量 0..100(双击上/下调节)
     uint8_t screen_off;                   // 待机息屏:0=30s 1=1min 2=5min 3=不息屏
+    uint8_t boot_sound;                   // 开机提示音:0=关 1=开
     char xz_server[APP_CFG_URL_LEN];      // 小智AI服务器(OTA 地址,留空用官方)
 } app_config_t;
+
+// 电台风格显示名
+const char *app_config_radio_style_name(void);
 
 esp_err_t app_config_load(void);  // 读 NVS,缺失项填默认值;首次启动返回 ESP_OK
 esp_err_t app_config_save(void);  // 整体写回 NVS,并递增 generation

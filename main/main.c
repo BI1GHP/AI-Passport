@@ -21,6 +21,8 @@
 #include "bsp_audio.h"
 #include "lvgl.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include <math.h>
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "esp_timer.h"
@@ -156,6 +158,8 @@ static void idle_timer_cb(lv_timer_t *t) {
     }
 }
 
+
+
 // ---- 按键:ADC 回调入队,独立任务消费 ----
 typedef struct { bsp_btn_t btn; bsp_btn_ev_t ev; } key_evt_t;
 static QueueHandle_t s_key_q;
@@ -273,6 +277,7 @@ void app_main(void) {
     bsp_audio_init();      // I2S 音频:电台/录音共用
     app_weather_init();
     app_radio_init();
+    app_radio_boot_sound();   // 门户上传的 boot.mp3(≤200KB),无文件则跳过
     app_recorder_init();
     app_mail_init();
     app_xiaozhi_init();
@@ -296,5 +301,7 @@ void app_main(void) {
 
     xTaskCreatePinnedToCore(input_task, "input", 4096, NULL, 5, NULL, 0);
 
-    ESP_LOGI(TAG, "电子工牌就绪");
+    ESP_LOGI(TAG, "电子工牌就绪 free_heap=%u min_heap=%u",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)esp_get_minimum_free_heap_size());
 }

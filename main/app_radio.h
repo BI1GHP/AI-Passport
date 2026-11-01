@@ -29,3 +29,6 @@ int app_radio_current(void);
 
 #define APP_RADIO_SPEC_BANDS 8
 void app_radio_spectrum(uint8_t *out); // 8 频段能量 0..100(停播时全 0)
+
+// 开机提示音:播放 FAT 上的 boot.mp3(门户上传,≤200KB)。无文件时零开销。
+void app_radio_boot_sound(void);

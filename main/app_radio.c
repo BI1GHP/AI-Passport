@@ -5,12 +5,14 @@
 #include "app_config.h"
 #include "app_net.h"
 #include "app_portal.h"
+#include "app_store.h"
 #include "bsp_audio.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -146,8 +148,10 @@ static float s_coeff[APP_RADIO_SPEC_BANDS];
 static int s_spec_sr;
 
 static void spec_setup(int samprate) {
-    // 频段中心频率(Hz)对数分布,钳到奈奎斯特以下
-    static const float f[APP_RADIO_SPEC_BANDS] = { 120, 300, 700, 1500, 3000, 6000, 10000, 15000 };
+    // 频段中心频率(Hz)对数分布,钳到奈奎斯特以下。
+    // 64kbps MP3 高频截止 ~16kHz,10k/15k 段能量极低柱子不动,
+    // 故把上界收到 8kHz,让 8 根柱子全部有可见起伏。
+    static const float f[APP_RADIO_SPEC_BANDS] = { 100, 250, 500, 1000, 2000, 3500, 5500, 8000 };
     s_spec_sr = samprate;
     for (int b = 0; b < APP_RADIO_SPEC_BANDS; b++) {
         float fc = f[b];
@@ -168,11 +172,11 @@ static void spec_feed(const short *pcm, int frames, int chans) {
             s1 = s0;
         }
         float mag = sqrtf(s1 * s1 + s2 * s2 - c * s1 * s2) / (float)frames / 32768.0f;
-        float v = mag * 600.0f;
+        float v = mag * 900.0f;            // 整体增益上调,弱信号也能起跳
         if (v > 1.0f) v = 1.0f + log10f(v); // 大信号对数压缩
-        v *= 55.0f;
+        v *= 70.0f;
         if (v > 100.0f) v = 100.0f;
-        s_spec[b] = v > s_spec[b] ? v : s_spec[b] * 0.82f; // 快攻慢放
+        s_spec[b] = v > s_spec[b] ? v : s_spec[b] * 0.80f; // 快攻慢放
     }
 }
 
@@ -581,5 +585,120 @@ void app_radio_stop(void) {
     // 清零 s_playing 并释放 s_play_done;超时就让它在后台收尾。
     if (xSemaphoreTake(s_play_done, pdMS_TO_TICKS(1200)) != pdTRUE) {
         ESP_LOGW(TAG, "停播超时:播放任务仍在收尾(1.2s)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 开机提示音:门户上传的 boot.mp3(≤200KB),启动后播放一遍。
+// 复用解码器的静态 in/pcm 缓冲,不额外占 RAM;播完(或超时/用户开电台)即退出。
+// ---------------------------------------------------------------------------
+#define BOOT_SND_MAX_BYTES (200 * 1024)
+#define BOOT_SND_MAX_MS    15000
+
+static void boot_sound_task(void *arg) {
+    (void)arg;
+    char path[64];
+    app_store_path(path, sizeof(path), "boot.mp3");
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        vTaskDelete(NULL);
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > BOOT_SND_MAX_BYTES) {
+        ESP_LOGW(TAG, "开机提示音超限(%ld 字节),最多 200KB", sz);
+        fclose(f);
+        vTaskDelete(NULL);
+        return;
+    }
+    HMP3Decoder dec = MP3InitDecoder();
+    if (!dec) {
+        ESP_LOGW(TAG, "开机提示音解码器初始化失败,空闲堆=%u", (unsigned)esp_get_free_heap_size());
+        fclose(f);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    unsigned char *in = s_in_buf;
+    short *pcm = s_pcm_buf;
+    int used = 0;
+    bool eof = false, format_set = false;
+    const int64_t t0 = esp_timer_get_time();
+    ESP_LOGI(TAG, "开机提示音开始: %ld 字节", sz);
+
+    while (!s_stop_play) {
+        if (esp_timer_get_time() - t0 > (int64_t)BOOT_SND_MAX_MS * 1000) {
+            ESP_LOGW(TAG, "开机提示音超时(%d ms),停止", BOOT_SND_MAX_MS);
+            break;
+        }
+        if (app_radio_playing()) break; // 用户已起播电台,让出喇叭
+        if (!eof && used < IN_BUF_SIZE) {
+            size_t n = fread(in + used, 1, (size_t)(IN_BUF_SIZE - used), f);
+            if (n > 0) {
+                used += (int)n;
+            } else {
+                eof = true;
+            }
+        }
+        if (used < 4) break;
+
+        unsigned char *p = in;
+        int left = used;
+        int off = MP3FindSyncWord(p, left);
+        if (off < 0) {
+            used = 0;
+            if (eof) break;
+            continue;
+        }
+        p += off;
+        left -= off;
+        int flen = 0, hsr = 0, hch = 0;
+        int hv = mp3_hdr_check(p, left, &flen, &hsr, &hch);
+        if (hv < 0) break; // 末尾残缺帧,丢弃
+        if (hv == 0) {
+            memmove(in, p + 1, (size_t)(left - 1));
+            used = left - 1;
+            continue;
+        }
+        int rc = MP3Decode(dec, &p, &left, pcm, 0);
+        if (rc != ERR_MP3_NONE) {
+            // 坏帧:跳过帧头重新找同步
+            const int skip = off + 1;
+            memmove(in, in + skip, (size_t)(used - skip));
+            used -= skip;
+            continue;
+        }
+        MP3FrameInfo info;
+        MP3GetLastFrameInfo(dec, &info);
+        if (!format_set && info.outputSamps > 0) {
+            if (bsp_audio_set_format((uint32_t)hsr, 16, (uint8_t)hch) != ESP_OK) break;
+            format_set = true;
+            ESP_LOGI(TAG, "开机提示音格式: %d Hz/%d ch", hsr, hch);
+        }
+        if (info.outputSamps > 0 && info.outputSamps <= PCM_SAMPLES) {
+            bsp_audio_write(pcm, (size_t)info.outputSamps * sizeof(short));
+        }
+        memmove(in, p, (size_t)left);
+        used = left;
+        if (eof && left < 4) break;
+    }
+
+    MP3FreeDecoder(dec);
+    fclose(f);
+    vTaskDelete(NULL);
+}
+
+void app_radio_boot_sound(void) {
+    if (!app_config()->boot_sound) return; // 设置里关闭了开机提示音
+    if (!app_store_ready()) return;
+    char path[64];
+    app_store_path(path, sizeof(path), "boot.mp3");
+    FILE *f = fopen(path, "rb");
+    if (!f) return; // 未上传提示音:开机完全零额外开销
+    fclose(f);
+    if (xTaskCreate(boot_sound_task, "boot_snd", 4096, NULL, 4, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "开机提示音任务创建失败(堆不足)");
     }
 }

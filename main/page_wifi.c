@@ -299,6 +299,7 @@ static void select_ap(int idx) {
     }
     if (ap->saved) {
         strlcpy(c->wifi_ssid, ap->ssid, sizeof(c->wifi_ssid));
+        c->wifi_pass[0] = '\0';   // 清空以触发 app_net_retry_sta() 使用已保存记录里的密码
         app_config_save();
         app_net_retry_sta();
         switch_view(VIEW_CONNECT);

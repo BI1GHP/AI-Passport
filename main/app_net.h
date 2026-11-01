@@ -20,6 +20,10 @@ int8_t app_net_sta_rssi(void);
 // 门户保存新 Wi-Fi 凭据后调用:应用新配置并触发连接。
 esp_err_t app_net_retry_sta(void);
 
+// ========== 已保存 Wi-Fi(最多 5 个,按连接成功先后保留) ==========
+#define APP_NET_WIFI_MAX 5
+bool app_net_wifi_is_saved(const char *ssid);  // 该 SSID 是否在已保存列表里
+
 // ========== Wi-Fi 扫描 ==========
 #define APP_NET_SCAN_MAX 10
 typedef struct {

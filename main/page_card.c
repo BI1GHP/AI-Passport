@@ -74,7 +74,7 @@ static void card_enter(void) {
     lv_obj_align(s_info, LV_ALIGN_TOP_MID, 0, 44);
     lv_obj_set_style_pad_all(s_info, 10, 0);
 
-    lv_obj_t *name = app_ui_label(s_info, c->name, app_font_cjk_16(), false);
+    lv_obj_t *name = app_ui_label(s_info, c->name, app_font_cjk_14(), false); // 14px 全字集(任意姓名)
     lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 4);
 
     lv_obj_t *nick = app_ui_label(s_info, c->nickname, app_font_cjk_14(), true);

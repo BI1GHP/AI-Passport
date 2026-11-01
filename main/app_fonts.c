@@ -8,6 +8,7 @@ static const char *TAG = "app_fonts";
 // 由 tools/gen_badge_font.py 生成,只含 main/ 源码里实际出现的中文字形。
 extern const lv_font_t badge_font_cjk_14;
 extern const lv_font_t badge_font_cjk_16;
+extern const lv_font_t badge_font_cjk_22;
 
 const lv_font_t *app_font_cjk_14(void) {
     return &badge_font_cjk_14;
@@ -15,6 +16,10 @@ const lv_font_t *app_font_cjk_14(void) {
 
 const lv_font_t *app_font_cjk_16(void) {
     return &badge_font_cjk_16;
+}
+
+const lv_font_t *app_font_cjk_22(void) {
+    return &badge_font_cjk_22;
 }
 
 static int probe_font(const lv_font_t *font) {

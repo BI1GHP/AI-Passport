@@ -10,7 +10,7 @@
 #include "bsp_display.h"
 #include "esp_log.h"
 
-#define ROW_COUNT 4
+#define ROW_COUNT 6
 
 static lv_obj_t *s_scr;
 static lv_obj_t *s_rows[ROW_COUNT];
@@ -42,7 +42,9 @@ static void refresh(void) {
     } else {
         lv_label_set_text_fmt(s_lbl[2], "Wi-Fi  连接中 %s", c->wifi_ssid);
     }
-    lv_label_set_text_fmt(s_lbl[3], "待机息屏  %s", app_config_screen_off_name());
+    lv_label_set_text_fmt(s_lbl[3], "电台风格  %s", app_config_radio_style_name());
+    lv_label_set_text_fmt(s_lbl[4], "待机息屏  %s", app_config_screen_off_name());
+    lv_label_set_text_fmt(s_lbl[5], "开机声音  %s", c->boot_sound ? "开" : "关");
     for (int i = 0; i < ROW_COUNT; i++) {
         app_ui_row_style(s_rows[i], s_lbl[i], i == s_sel);
     }
@@ -67,12 +69,12 @@ static void settings_enter(void) {
     s_scr = app_ui_screen_create("设置");
     for (int i = 0; i < ROW_COUNT; i++) {
         s_rows[i] = app_ui_panel(s_scr, 180, 28);
-        lv_obj_set_pos(s_rows[i], 30, 34 + i * 29);
+        lv_obj_set_pos(s_rows[i], 30, 34 + i * 28);
         s_lbl[i] = app_ui_label(s_rows[i], "", app_font_cjk_14(), false);
         lv_obj_center(s_lbl[i]);
     }
     s_hint = app_ui_hint(s_scr);
-    lv_obj_align(s_hint, LV_ALIGN_TOP_MID, 0, 154);
+    lv_obj_align(s_hint, LV_ALIGN_TOP_MID, 0, 206);
     s_sel = 0;
     refresh();
     s_poll = lv_timer_create(poll_timer, 2000, NULL);
@@ -109,6 +111,12 @@ static void cycle_screen_off(void) {
     app_config_save();
 }
 
+static void toggle_boot_sound(void) {
+    app_config_t *c = app_config();
+    c->boot_sound = c->boot_sound ? 0 : 1;
+    app_config_save();
+}
+
 static void settings_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
     if (ev != BSP_BTN_CLICK) return;
     if (btn == BSP_BTN_OK) {
@@ -125,8 +133,14 @@ static void settings_key(bsp_btn_t btn, bsp_btn_ev_t ev) {
         } else if (s_sel == 2) {
             app_nav_open(page_wifi());
             return;
-        } else {
+        } else if (s_sel == 3) {
+            app_config_t *c = app_config();
+            c->radio_style = (c->radio_style + 1) % 2;
+            app_config_save();
+        } else if (s_sel == 4) {
             cycle_screen_off();
+        } else {
+            toggle_boot_sound();
         }
         if (bsp_lvgl_lock(200)) {
             refresh();

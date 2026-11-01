@@ -14,7 +14,9 @@
 #include "esp_wifi_default.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "nvs.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "app_net";
@@ -31,18 +33,153 @@ static volatile bool s_sta_connected;
 static SemaphoreHandle_t s_lock;
 static const char *s_lock_owner;
 
+// ---------------------------------------------------------------------------
+// 已保存 Wi-Fi 记录:最多 5 个,按"最近连接成功"顺序排列(NVS 命名空间 wlst)。
+// 启动/断线时按顺序尝试,哪个可用就自动连哪个。
+// ---------------------------------------------------------------------------
+typedef struct {
+    char ssid[33];
+    char pass[65];
+} wifi_rec_t;
+
+static wifi_rec_t s_wrec[APP_NET_WIFI_MAX];
+static int s_wrec_n;
+static int s_try_idx;     // 当前正在尝试的记录下标
+static int s_fail_cnt;    // 当前记录连续失败次数
+static nvs_handle_t s_wnvs;
+static bool s_wnvs_ok;
+
+static int wrec_find(const char *ssid) {
+    if (!ssid || !ssid[0]) return -1;
+    for (int i = 0; i < s_wrec_n; i++) {
+        if (strcmp(s_wrec[i].ssid, ssid) == 0) return i;
+    }
+    return -1;
+}
+
+static void wrec_persist(void) {
+    if (!s_wnvs_ok) return;
+    nvs_set_u8(s_wnvs, "n", (uint8_t)s_wrec_n);
+    char k[16];
+    for (int i = 0; i < s_wrec_n; i++) {
+        snprintf(k, sizeof(k), "s%d", i);
+        nvs_set_str(s_wnvs, k, s_wrec[i].ssid);
+        snprintf(k, sizeof(k), "p%d", i);
+        nvs_set_str(s_wnvs, k, s_wrec[i].pass);
+    }
+    // 列表缩短时清掉多余旧槽,避免下次读回残留
+    for (int i = s_wrec_n; i < APP_NET_WIFI_MAX; i++) {
+        snprintf(k, sizeof(k), "s%d", i);
+        nvs_erase_key(s_wnvs, k);
+        snprintf(k, sizeof(k), "p%d", i);
+        nvs_erase_key(s_wnvs, k);
+    }
+    nvs_commit(s_wnvs);
+}
+
+static void wrec_load(void) {
+    s_wrec_n = 0;
+    if (nvs_open("wlst", NVS_READWRITE, &s_wnvs) != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi 记录存储不可用,仅本次运行有效");
+        return;
+    }
+    s_wnvs_ok = true;
+    uint8_t n = 0;
+    if (nvs_get_u8(s_wnvs, "n", &n) != ESP_OK) return;
+    if (n > APP_NET_WIFI_MAX) n = APP_NET_WIFI_MAX;
+    char k[16];
+    for (int i = 0; i < (int)n; i++) {
+        char ssid[33] = { 0 };
+        char pass[65] = { 0 };
+        size_t len = sizeof(ssid);
+        snprintf(k, sizeof(k), "s%d", i);
+        if (nvs_get_str(s_wnvs, k, ssid, &len) != ESP_OK || !ssid[0]) continue;
+        len = sizeof(pass);
+        snprintf(k, sizeof(k), "p%d", i);
+        nvs_get_str(s_wnvs, k, pass, &len); // 开放网络无密码也合法
+        strlcpy(s_wrec[s_wrec_n].ssid, ssid, sizeof(s_wrec[s_wrec_n].ssid));
+        strlcpy(s_wrec[s_wrec_n].pass, pass, sizeof(s_wrec[s_wrec_n].pass));
+        s_wrec_n++;
+    }
+    ESP_LOGI(TAG, "已保存 Wi-Fi %d 个", s_wrec_n);
+}
+
+// 连接成功才调用:置顶该记录、去重、最多保留 5 个。
+static void wrec_remember(const char *ssid, const char *pass) {
+    if (!ssid || !ssid[0]) return;
+    const int idx = wrec_find(ssid);
+    if (idx == 0 && strcmp(s_wrec[0].pass, pass ? pass : "") == 0) return; // 无变化
+
+    wifi_rec_t rec;
+    memset(&rec, 0, sizeof(rec));
+    strlcpy(rec.ssid, ssid, sizeof(rec.ssid));
+    strlcpy(rec.pass, pass ? pass : "", sizeof(rec.pass));
+
+    if (idx >= 0) {                      // 已存在:移到队首
+        for (int i = idx; i > 0; i--) s_wrec[i] = s_wrec[i - 1];
+    } else {                             // 新网络:插入队首,满了丢最旧的
+        const int top = (s_wrec_n < APP_NET_WIFI_MAX) ? s_wrec_n : APP_NET_WIFI_MAX - 1;
+        for (int i = top; i > 0; i--) s_wrec[i] = s_wrec[i - 1];
+        if (s_wrec_n < APP_NET_WIFI_MAX) s_wrec_n++;
+    }
+    s_wrec[0] = rec;
+    s_try_idx = 0;
+    s_fail_cnt = 0;
+    wrec_persist();
+    ESP_LOGI(TAG, "记录 Wi-Fi(共 %d 个): %s", s_wrec_n, rec.ssid);
+}
+
+// 仅下发配置,不触发连接(供 init 阶段使用)
+static esp_err_t wrec_apply(int idx) {
+    if (idx < 0 || idx >= s_wrec_n) return ESP_ERR_INVALID_ARG;
+    wifi_config_t sta = { 0 };
+    strlcpy((char *)sta.sta.ssid, s_wrec[idx].ssid, sizeof(sta.sta.ssid));
+    strlcpy((char *)sta.sta.password, s_wrec[idx].pass, sizeof(sta.sta.password));
+    sta.sta.threshold.authmode = s_wrec[idx].pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+    s_try_idx = idx;
+    return esp_wifi_set_config(WIFI_IF_STA, &sta);
+}
+
+// 切到第 idx 个记录并重连
+static void wrec_connect(int idx) {
+    if (idx < 0 || idx >= s_wrec_n) return;
+    if (wrec_apply(idx) != ESP_OK) return;
+    s_sta_connected = false;
+    esp_wifi_disconnect();
+    esp_wifi_connect();
+    ESP_LOGI(TAG, "尝试已保存 Wi-Fi %d/%d: %s", idx + 1, s_wrec_n, s_wrec[idx].ssid);
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     (void)arg; (void)base; (void)data;
     if (id == WIFI_EVENT_STA_START) {
+        if (s_wrec_n > 0) {
+            wrec_apply(0);
+            esp_wifi_connect();
+            return;
+        }
         app_config_t *c = app_config();
         if (c->wifi_ssid[0]) esp_wifi_connect();
     } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
         s_sta_connected = false;
         app_config_t *c = app_config();
-        if (c->wifi_ssid[0]) {
-            ESP_LOGW(TAG, "STA 断开,重新连接");
-            esp_wifi_connect();
+        // 用户在设置页主动断开(清空了 SSID)时不再自动重连
+        if (!c->wifi_ssid[0]) return;
+        if (s_wrec_n > 0) {
+            s_fail_cnt++;
+            if (s_fail_cnt >= 2 && s_wrec_n > 1) {
+                s_fail_cnt = 0;
+                ESP_LOGW(TAG, "%s 连不上,换下一个已保存网络",
+                         s_wrec[s_try_idx].ssid);
+                wrec_connect((s_try_idx + 1) % s_wrec_n);
+            } else {
+                ESP_LOGW(TAG, "STA 断开,重新连接 %s", s_wrec[s_try_idx].ssid);
+                esp_wifi_connect();
+            }
+            return;
         }
+        ESP_LOGW(TAG, "STA 断开,重新连接");
+        esp_wifi_connect();
     }
 }
 
@@ -50,7 +187,23 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
     (void)arg; (void)base; (void)id;
     const ip_event_got_ip_t *ev = (const ip_event_got_ip_t *)data;
     s_sta_connected = true;
+    s_fail_cnt = 0;
     ESP_LOGI(TAG, "STA 已获取 IP: " IPSTR, IP2STR(&ev->ip_info.ip));
+
+    // 连接成功才记入"已保存 Wi-Fi"(最多 5 个),并同步到 app_config(UI/门户显示用)
+    wifi_config_t cur;
+    if (esp_wifi_get_config(WIFI_IF_STA, &cur) == ESP_OK && cur.sta.ssid[0]) {
+        const char *ssid = (const char *)cur.sta.ssid;
+        const char *pass = (const char *)cur.sta.password;
+        wrec_remember(ssid, pass);
+        app_config_t *c = app_config();
+        if (strcmp(c->wifi_ssid, ssid) != 0 || strcmp(c->wifi_pass, pass) != 0) {
+            strlcpy(c->wifi_ssid, ssid, sizeof(c->wifi_ssid));
+            strlcpy(c->wifi_pass, pass, sizeof(c->wifi_pass));
+            app_config_save();
+        }
+    }
+
     app_portal_start();  // STA 连网后自动启动门户,STA IP 可访问
     app_time_sntp_start();
     app_weather_request_refresh();
@@ -106,19 +259,23 @@ esp_err_t app_net_init(void) {
     if (e != ESP_OK) goto fail;
 
     app_config_t *c = app_config();
-    if (c->wifi_ssid[0]) {
-        wifi_config_t sta = { 0 };
-        strlcpy((char *)sta.sta.ssid, c->wifi_ssid, sizeof(sta.sta.ssid));
-        strlcpy((char *)sta.sta.password, c->wifi_pass, sizeof(sta.sta.password));
-        sta.sta.threshold.authmode = c->wifi_pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
-        e = esp_wifi_set_config(WIFI_IF_STA, &sta);
-        if (e != ESP_OK) goto fail;
-        ESP_LOGI(TAG, "连接 Wi-Fi: %s", c->wifi_ssid);
+    wrec_load();
+    // 老固件只保存了单个 SSID:迁移成第一条记录
+    if (s_wrec_n == 0 && c->wifi_ssid[0]) {
+        wrec_remember(c->wifi_ssid, c->wifi_pass);
+    }
+    if (s_wrec_n > 0) {
+        esp_err_t ce = wrec_apply(0);
+        if (ce != ESP_OK) goto fail;
+        ESP_LOGI(TAG, "连接 Wi-Fi: %s(已保存 %d 个)", s_wrec[0].ssid, s_wrec_n);
     } else {
         ESP_LOGI(TAG, "未配置 Wi-Fi;请到 设置 > Wi-Fi 页面选择网络并输入密码");
     }
     e = esp_wifi_start();
     if (e != ESP_OK) goto fail;
+
+    // 默认开 Modem-sleep 省电;电台/小智等低延迟场景会临时切 WIFI_PS_NONE 并恢复
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
     // 初始化 SNTP 客户端(必须在 esp_netif_init + event_loop_create_default 之后)
     app_time_sntp_init();
@@ -153,20 +310,34 @@ int8_t app_net_sta_rssi(void) {
 esp_err_t app_net_retry_sta(void) {
     if (!s_wifi_started) return ESP_ERR_INVALID_STATE;
     app_config_t *c = app_config();
-    const bool had_ssid_before = app_net_sta_connected();
+    if (!c->wifi_ssid[0]) return ESP_OK;
+    const bool was_connected = app_net_sta_connected();
+
+    // 从已保存列表里找:页面只传 SSID(未填密码)时用记录里存的密码
+    const int sidx = wrec_find(c->wifi_ssid);
+    const char *pass = c->wifi_pass;
+    if (sidx >= 0 && !c->wifi_pass[0]) pass = s_wrec[sidx].pass;
+
     wifi_config_t sta = { 0 };
-    if (c->wifi_ssid[0]) {
-        strlcpy((char *)sta.sta.ssid, c->wifi_ssid, sizeof(sta.sta.ssid));
-        strlcpy((char *)sta.sta.password, c->wifi_pass, sizeof(sta.sta.password));
-        sta.sta.threshold.authmode = c->wifi_pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
-        esp_err_t e = esp_wifi_set_config(WIFI_IF_STA, &sta);
-        if (e != ESP_OK) return e;
-        s_sta_connected = false;
-        if (had_ssid_before) esp_wifi_disconnect();
-        esp_wifi_connect();
-        ESP_LOGI(TAG, "STA 重连 %s", c->wifi_ssid);
+    strlcpy((char *)sta.sta.ssid, c->wifi_ssid, sizeof(sta.sta.ssid));
+    strlcpy((char *)sta.sta.password, pass, sizeof(sta.sta.password));
+    sta.sta.threshold.authmode = pass[0] ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+    esp_err_t e = esp_wifi_set_config(WIFI_IF_STA, &sta);
+    if (e != ESP_OK) return e;
+
+    if (sidx >= 0) { // 针对已保存记录:轮到它作为当前尝试项
+        s_try_idx = sidx;
+        s_fail_cnt = 0;
     }
+    s_sta_connected = false;
+    if (was_connected) esp_wifi_disconnect();
+    esp_wifi_connect();
+    ESP_LOGI(TAG, "STA 重连 %s", c->wifi_ssid);
     return ESP_OK;
+}
+
+bool app_net_wifi_is_saved(const char *ssid) {
+    return wrec_find(ssid) >= 0;
 }
 
 bool app_net_try_acquire(const char *owner) {
@@ -245,7 +416,9 @@ static void scan_task(void *arg) {
         if (cur_ssid && strcmp(s_scan_cache[i].ssid, cur_ssid) == 0) {
             s_scan_cache[i].connected = true;
         }
-        if (cfg->wifi_ssid[0] && strcmp(s_scan_cache[i].ssid, cfg->wifi_ssid) == 0) {
+        // 已保存过密码(列表最多 5 个)的网络标记 saved,选中后免输密码
+        if (app_net_wifi_is_saved(s_scan_cache[i].ssid) ||
+            (cfg->wifi_ssid[0] && strcmp(s_scan_cache[i].ssid, cfg->wifi_ssid) == 0)) {
             s_scan_cache[i].saved = true;
         }
         s_scan_count++;
