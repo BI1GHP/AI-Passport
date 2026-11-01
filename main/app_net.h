@@ -39,6 +39,10 @@ bool app_net_scan_busy(void);                         // 扫描进行中?
 int app_net_scan_count(void);                         // 缓存结果数(scan 完成后有效)
 const app_net_ap_t *app_net_scan_get(int index);      // 0..count-1
 
+// Wi-Fi 省电策略。默认关闭省电(响应快);息屏待机时再开 modem-sleep 省电。
+// 省电模式下 AP 按 DTIM 批量投递,DNS/TLS 会出现数百毫秒到数秒的停顿。
+void app_net_set_power_save(bool low_power);
+
 // 网络活动互斥:天气/邮箱/电台等主动联网任务同时只允许一个。
 // 非阻塞;获取成功后在完成任务后必须 release。owner 仅用于日志。
 bool app_net_try_acquire(const char *owner);

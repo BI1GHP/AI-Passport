@@ -274,8 +274,10 @@ esp_err_t app_net_init(void) {
     e = esp_wifi_start();
     if (e != ESP_OK) goto fail;
 
-    // 默认开 Modem-sleep 省电;电台/小智等低延迟场景会临时切 WIFI_PS_NONE 并恢复
-    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    // 默认关 Modem-sleep:省电模式下 AP 按 DTIM(~102ms)批量投递报文,
+    // 会周期性停顿数百毫秒到数秒(电台实测单次读 4831ms),天气/邮箱/小智
+    // 的 TLS 握手都要多花几倍时间。待机息屏时改由 main 侧切回省电。
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     // 初始化 SNTP 客户端(必须在 esp_netif_init + event_loop_create_default 之后)
     app_time_sntp_init();
@@ -289,6 +291,11 @@ fail:
 
 bool app_net_sta_connected(void) {
     return s_sta_connected;
+}
+
+void app_net_set_power_save(bool low_power) {
+    if (!s_wifi_started) return;
+    esp_wifi_set_ps(low_power ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
 }
 
 void app_net_sta_ip(char *buf, size_t bufsize) {

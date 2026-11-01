@@ -11,6 +11,7 @@
 #include "app_config.h"
 #include "app_fonts.h"
 #include "app_net.h"
+#include "app_portal.h"
 #include "app_time.h"
 #include "app_store.h"
 #include "app_weather.h"
@@ -138,6 +139,7 @@ void app_nav_back(void) {
 
 static volatile uint32_t s_activity_gen; // 每次按键事件 +1,供 LVGL 任务无锁检测
 static volatile bool s_screen_off;
+static bool s_portal_idle_off;           // 待机时停掉的门户,唤醒后恢复
 static int64_t s_wake_ignore_until_us;   // 唤醒后短时忽略本次手势剩余事件
 static uint32_t s_idle_gen;
 static uint32_t s_idle_sec;
@@ -155,6 +157,16 @@ static void idle_timer_cb(lv_timer_t *t) {
     if (++s_idle_sec >= limit) {
         s_screen_off = true;
         bsp_display_backlight(0);
+        // 待机才开 Wi-Fi 省电:播放/会话中的网络停顿会直接变成卡顿,
+        // 这两种情况即使息屏也保持关省电。
+        if (!app_radio_playing() && app_xiaozhi_state() == XZ_ST_IDLE) {
+            app_net_set_power_save(true);
+            // 待机时停掉配网门户,把 httpd 的任务栈和 socket 还给系统;
+            // 按键唤醒时自动恢复,不影响配网。
+            if (app_portal_running() && app_portal_stop() == ESP_OK) {
+                s_portal_idle_off = true;
+            }
+        }
     }
 }
 
@@ -183,6 +195,11 @@ static void on_button(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
         s_screen_off = false;
         s_activity_gen++;
         bsp_display_backlight(SCREEN_ON_BACKLIGHT);
+        app_net_set_power_save(false);
+        if (s_portal_idle_off) {
+            s_portal_idle_off = false;
+            app_portal_start();
+        }
         s_wake_ignore_until_us = now_us + 400000;
         return;
     }

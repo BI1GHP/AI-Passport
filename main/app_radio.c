@@ -319,10 +319,8 @@ static void play_task(void *arg) {
         ESP_LOGW(TAG, "网络忙,无法播放(owner=%s)", app_net_lock_owner() ? app_net_lock_owner() : "?");
         goto done;
     }
-    // 播放期间关闭 Wi-Fi modem sleep:省电模式下 AP 按 DTIM(~102ms)批量缓存
-    // 投递报文,实时流读会周期性停顿数百毫秒甚至数秒(诊断实测单次读 4831ms),
-    // ring+DMA 的 ~126ms 缓冲根本扛不住,表现为周期性卡顿。停播后恢复。
-    esp_wifi_set_ps(WIFI_PS_NONE);
+    // Wi-Fi 省电由 app_net 统一管理:屏亮/播放期间关省电,仅息屏待机时开,
+    // 避免省电模式的 DTIM 批量投递把流读拖成数秒停顿。
     esp_http_client_config_t cfg = {
         .url = station.url,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -453,11 +451,11 @@ static void play_task(void *arg) {
                     }
                     round_frames++;
                     frames_total++;
-                    // 频谱每 4 帧算 1 次:C3 无 FPU,Goertzel 浮点 MAC 全软件模拟,
+                    // 频谱每 8 帧算 1 次:C3 无 FPU,Goertzel 浮点 MAC 全软件模拟,
                     // 每帧全算约占 18% CPU,叠加 Helix 解码会把帧速率压到 19~29 帧/秒
                     // (实时需 41.7),ring 被持续抽干——炸音真凶(帧计数日志实证)。
                     // 显示刷新仅 120ms,降频后视觉无感。
-                    if ((frames_total & 3) == 0) {
+                    if ((frames_total & 7) == 0) {
                         spec_feed(pcm, info.outputSamps / info.nChans, info.nChans);
                     }
                     // 无损发送:ring 满时阻塞等写入任务排空,绝不丢弃已解码 PCM。
@@ -527,6 +525,9 @@ static void play_task(void *arg) {
             }
             used += n;
             bytes_total += n;
+            // 主动让出 CPU:解码任务持续满负荷,与 LVGL 同优先级时若不让出,
+            // 界面线程仍可能长时间拿不到时间片,表现为"画面卡死、声音正常"。
+            vTaskDelay(pdMS_TO_TICKS(2));
         }
 
     // 通知写入任务排空并等其退出,之后才能关 codec/释放解码器
@@ -539,7 +540,6 @@ release_net:
     if (dec) MP3FreeDecoder(dec);
     if (client) esp_http_client_close(client);
     if (client) esp_http_client_cleanup(client);
-    esp_wifi_set_ps(WIFI_PS_MIN_MODEM); // 恢复默认省电
     app_net_release("radio-play");
     if (portal_paused) app_portal_start();
 done:
@@ -568,7 +568,9 @@ esp_err_t app_radio_play(int index) {
     // 栈 8KB:4KB 实测在"HTTP 收包 + Helix 解码"叠加时贴近溢出,
     // 起播阶段触发过 Store access fault(崩在 xmp3_UnpackSideInfo)。
     // 多出的 4KB 只在播放期间占用,播放期空闲堆仍有 23~37KB。
-    if (xTaskCreate(play_task, "badge_radio", 8192, NULL, 6, NULL) != pdPASS) {
+    // 优先级与 LVGL 任务(4)持平:原来 6 会长期压制界面线程,画面停止重绘
+    // 而音频(写入任务 6 + I2S DMA)照常出声,即"卡死但声音正常"。
+    if (xTaskCreate(play_task, "badge_radio", 8192, NULL, 4, NULL) != pdPASS) {
         s_playing = false;
         ESP_LOGE(TAG, "播放任务创建失败(堆不足)");
         return ESP_ERR_NO_MEM;

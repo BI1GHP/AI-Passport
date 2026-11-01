@@ -341,6 +341,14 @@ static void xz_end_uplink(void **enc) {
     }
 }
 
+// 会话退出时释放进页面预置的编码器(未被聆听用到的那份)
+static void xz_free_pre_enc(void) {
+    if (s_enc_pre) {
+        esp_opus_enc_close(s_enc_pre);
+        s_enc_pre = NULL;
+    }
+}
+
 // ---- MCP 工具(小智协议 type:"mcp",payload 为 JSON-RPC 2.0) ----
 #define MCP_TEXT_MAX 640
 #define NEWS_URL "https://60s.viki.moe/v2/60s"
@@ -620,8 +628,23 @@ static void xz_task(void *arg) {
     TickType_t recon_tick = 0; // 进入 CONNECTING 的时刻,用于重连超时判定
 
     set_state(XZ_ST_CONNECTING);
-    if (!app_net_try_acquire("xiaozhi")) {
-        ESP_LOGW(TAG, "网络忙");
+    // 预连接任务刚释放锁,天气/门户可能抢到;重试等待,别一次失败就放弃。
+    bool locked = false;
+    for (int i = 0; i < 100 && !locked; i++) {
+        xz_evt_t ev;
+        if (xQueueReceive(s_q, &ev, 0) == pdTRUE) {
+            if (ev.type == EV_CLOSE) goto done;
+            free(ev.data);
+        }
+        if (app_net_try_acquire("xiaozhi")) {
+            locked = true;
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+    if (!locked) {
+        ESP_LOGW(TAG, "网络忙(owner=%s)",
+                 app_net_lock_owner() ? app_net_lock_owner() : "?");
         set_state(XZ_ST_ERROR);
         goto done;
     }
@@ -964,7 +987,7 @@ release_net:
 done:
     set_state(XZ_ST_IDLE);
     s_running = false;
-    esp_wifi_set_ps(WIFI_PS_MIN_MODEM); // 会话结束恢复省电
+    xz_free_pre_enc();
     if (s_portal_paused) { // 恢复会话期间暂停的配网门户
         s_portal_paused = false;
         app_portal_start();
@@ -978,8 +1001,24 @@ static void xz_prep_task(void *arg) {
     (void)arg;
     s_prep.ready = false;
     set_state(XZ_ST_CONNECTING);
-    if (!app_net_try_acquire("xiaozhi")) {
-        ESP_LOGW(TAG, "网络忙");
+    // 网络锁可能被天气刷新/门户占用(天气最长 12 秒),这里重试等待而不是
+    // 一次失败就报错退出——否则"网络忙"会让小智直接连不上。
+    bool locked = false;
+    for (int i = 0; i < 60 && !locked; i++) {
+        xz_evt_t ev;
+        if (xQueueReceive(s_q, &ev, 0) == pdTRUE) {
+            if (ev.type == EV_CLOSE) goto finish;
+            free(ev.data);
+        }
+        if (app_net_try_acquire("xiaozhi")) {
+            locked = true;
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+    if (!locked) {
+        ESP_LOGW(TAG, "网络忙(owner=%s),放弃本次会话",
+                 app_net_lock_owner() ? app_net_lock_owner() : "?");
         set_state(XZ_ST_ERROR);
         goto finish;
     }
@@ -1024,7 +1063,7 @@ static void xz_prep_task(void *arg) {
 finish:
     set_state(XZ_ST_IDLE);
     s_running = false;
-    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    xz_free_pre_enc();
     if (s_portal_paused) {
         s_portal_paused = false;
         app_portal_start();
@@ -1049,9 +1088,8 @@ esp_err_t app_xiaozhi_init(void) {
              (unsigned long)((r1 >> 16) & 0x0FFF) | 0x4000,
              (unsigned long)(r2 & 0x3FFF) | 0x8000,
              (unsigned long)(r2 >> 16), (unsigned long)r3);
-    // 趁开机堆完整时预分配编码器:会话收发 JSON 后堆会碎片化,
-    // 21 KB 连续块就再也拿不到(实测最大块只剩 9.7 KB)。
-    s_enc_pre = xz_enc_open();
+    // 编码器改到进页面时分配(见 app_xiaozhi_open):开机不再常驻占 21KB,
+    // 不玩小智时这段连续堆留给电台解码、天气/邮箱的 TLS 握手。
     return ESP_OK;
 }
 
@@ -1065,6 +1103,13 @@ esp_err_t app_xiaozhi_open(void) {
     // 会话期间暂停配网门户:httpd 及其缓冲占掉的就是编码器最缺的连续堆
     s_portal_paused = app_portal_running();
     if (s_portal_paused) app_portal_stop();
+
+    // 编码器在这里预置:门户刚停、TLS 未开,是进页面后堆最连续的时刻。
+    // 退出页面时由 xz_free_pre_enc() 释放,不做常驻占用。
+    if (!s_enc_pre) {
+        s_enc_pre = xz_enc_open();
+    }
+
     ESP_LOGI(TAG, "开始会话(空闲=%u 最大块=%u)",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
